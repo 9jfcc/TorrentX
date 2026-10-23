@@ -672,11 +672,13 @@ def verify_and_auto_sync(video_path, sub_path):
             vdata = json.loads(proc.stdout)
             v_dur = float(vdata.get("format", {}).get("duration", 0))
             if v_dur > 0:
-                # Subtitle ending beyond video or > 15m too early indicates mismatch
-                if last_sub > v_dur + 5 or last_sub < v_dur - 900:
-                    print(f"Timing mismatch detected (Sub end: {last_sub}s, Video: {v_dur}s). Invoking AutoSubSync...")
+                # Strict Timing Verification:
+                # Subtitle ending after video (+3s) or ending more than 90s before video ends indicates timing/frame-rate mismatch.
+                # A 10m discrepancy was previously missed by 900s tolerance; 90s tightly accounts for ending credits.
+                if last_sub > v_dur + 3 or last_sub < v_dur - 90:
+                    print(f"Timing mismatch detected (Sub end: {last_sub:.1f}s, Video duration: {v_dur:.1f}s, Diff: {abs(v_dur - last_sub):.1f}s). Invoking AutoSubSync...")
                     return sync_subtitle_with_autosubsync(video_path, sub_path)
-                return {"status": "matched", "video_duration": v_dur, "sub_end": last_sub, "message": "Timing matches video duration"}
+                return {"status": "matched", "video_duration": v_dur, "sub_end": last_sub, "diff_seconds": round(v_dur - last_sub, 2), "message": "Timing matches video duration"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
     return {"status": "unverified"}

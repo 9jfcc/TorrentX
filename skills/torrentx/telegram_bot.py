@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import requests
+import secrets
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -32,7 +33,8 @@ def load_config():
     default_cfg = {
         "telegram": {
             "token": "",
-            "allowed_chat_ids": []
+            "allowed_user_ids": [],
+            "pairing_code": str(secrets.randbelow(900000) + 100000)
         },
         "discord": {
             "token": "",
@@ -52,6 +54,9 @@ def load_config():
             cfg = json.load(f)
             if "telegram" not in cfg:
                 cfg["telegram"] = default_cfg["telegram"]
+            if "pairing_code" not in cfg["telegram"] or not cfg["telegram"]["pairing_code"]:
+                cfg["telegram"]["pairing_code"] = str(secrets.randbelow(900000) + 100000)
+                save_config(cfg)
             return cfg
     except Exception as e:
         logger.error(f"Error reading config: {e}")
@@ -70,6 +75,10 @@ class TelegramBot:
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.offset = 0
         self.running = True
+        cfg = load_config()
+        p_code = cfg.get("telegram", {}).get("pairing_code", "")
+        if p_code and not cfg.get("telegram", {}).get("allowed_user_ids"):
+            print(f"\n{'='*55}\n🔑 [TELEGRAM SECURITY PAIRING PIN]: {p_code}\nSend '/pair {p_code}' in Telegram chat to link your account!\n{'='*55}\n")
 
     def send_request(self, method, payload=None, timeout=35):
         url = f"{self.base_url}/{method}"
@@ -116,28 +125,46 @@ class TelegramBot:
         if not text or not chat_id:
             return
 
+        sender_id = user.get("id")
+        if not sender_id:
+            return
+
         cfg = load_config()
-        allowed = cfg["telegram"].get("allowed_user_ids", cfg["telegram"].get("allowed_chat_ids", []))
-        sender_id = user.get("id") or chat_id
+        allowed = cfg["telegram"].get("allowed_user_ids", [])
+        pairing_code = str(cfg["telegram"].get("pairing_code", "")).strip()
 
-        # Auto-claim: if list is empty, claim first direct user (not group) as authorized owner
-        if not allowed and chat.get("type") == "private":
-            allowed.append(sender_id)
-            cfg["telegram"]["allowed_user_ids"] = allowed
-            save_config(cfg)
-            welcome_owner = (
-                f"🎉 أهلاً بك يا {user_name}!\n\n"
-                f"تم اعتماد حسابك كمالك ومتحكم رئيسي بالبوت بنجاح.\n"
-                f"معرّفك (ID): `{sender_id}`\n\n"
-                "الآن يمكنك إرسال أي طلب وسينفذه جهازك فوراً!"
-            )
-            self.send_message(chat_id, welcome_owner, reply_to_message_id=msg_id)
+        # Handle Pairing PIN Command (/pair 123456 or ربط 123456)
+        pair_match = re.search(r'^(?:/pair|!pair|ربط)\s*(\d+)', text, re.I)
+        if pair_match:
+            entered_code = pair_match.group(1).strip()
+            if pairing_code and entered_code == pairing_code:
+                if sender_id not in allowed:
+                    allowed.append(sender_id)
+                    cfg["telegram"]["allowed_user_ids"] = allowed
+                    cfg["telegram"]["pairing_code"] = str(secrets.randbelow(900000) + 100000)
+                    save_config(cfg)
+                self.send_message(
+                    chat_id,
+                    f"🎉 **تم توثيق وربط جهازك بنجاح!**\n\nأهلاً بك يا {user_name}، تم اعتماد حسابك الآن كمالك ومتحكم رئيسي.\nمعرّفك (ID): `{sender_id}`\n\nيمكنك الآن إرسال أي أمر وسينفذه جهازك فوراً!",
+                    reply_to_message_id=msg_id
+                )
+                return
+            else:
+                self.send_message(
+                    chat_id,
+                    "❌ كود الربط غير صحيح أو انتهت صلاحيته. يرجى التأكد من الكود الظاهر في شاشة جهازك.",
+                    reply_to_message_id=msg_id
+                )
+                return
 
-        # Check authorization by personal user ID
+        # Check authorization by personal user ID (prevents unauthorized group chatter)
         if sender_id not in allowed:
             self.send_message(
                 chat_id,
-                "⛔ عذراً، هذا البوت شخصي ومخصص للتحكم بجهاز الكمبيوتر الخاص بمالكه فقط.",
+                "🔒 **هذا البوت مقفل لأمان جهاز الكمبيوتر الخاص بك.**\n\n"
+                "لربط حسابك وتفعيله، احصل على كود الربط المكوّن من 6 أرقام من نافذة تشغيل البوت على جهازك، ثم أرسل:\n"
+                "`/pair <الكود>`\n\n"
+                f"معرّفك الشخصي (ID): `{sender_id}`",
                 reply_to_message_id=msg_id
             )
             return

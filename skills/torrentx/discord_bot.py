@@ -9,6 +9,8 @@ import sys
 import json
 import logging
 import asyncio
+import secrets
+import re
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -36,7 +38,8 @@ def load_config():
         },
         "discord": {
             "token": "",
-            "allowed_user_ids": []
+            "allowed_user_ids": [],
+            "pairing_code": str(secrets.randbelow(900000) + 100000)
         }
     }
     if not os.path.exists(CONFIG_PATH):
@@ -52,6 +55,9 @@ def load_config():
             cfg = json.load(f)
             if "discord" not in cfg:
                 cfg["discord"] = default_cfg["discord"]
+            if "pairing_code" not in cfg["discord"] or not cfg["discord"]["pairing_code"]:
+                cfg["discord"]["pairing_code"] = str(secrets.randbelow(900000) + 100000)
+                save_config(cfg)
             return cfg
     except Exception as e:
         logger.error(f"Error reading config: {e}")
@@ -71,6 +77,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     logger.info(f"🚀 Discord Bot connected as {bot.user.name} (ID: {bot.user.id})")
+    cfg = load_config()
+    p_code = cfg.get("discord", {}).get("pairing_code", "")
+    if p_code and not cfg.get("discord", {}).get("allowed_user_ids"):
+        print(f"\n{'='*55}\n🔑 [DISCORD SECURITY PAIRING PIN]: {p_code}\nSend '!pair {p_code}' in Discord chat to link your account!\n{'='*55}\n")
     print(f"🚀 Discord Bot is active as {bot.user.name}!")
 
 @bot.command(name="status")
@@ -124,25 +134,37 @@ async def on_message(message):
     if not text:
         return
 
+    sender_id = message.author.id
     cfg = load_config()
     allowed = cfg["discord"].get("allowed_user_ids", [])
+    pairing_code = str(cfg["discord"].get("pairing_code", "")).strip()
 
-    # Auto-claim owner if allowed_user_ids is empty
-    if not allowed:
-        allowed.append(message.author.id)
-        cfg["discord"]["allowed_user_ids"] = allowed
-        save_config(cfg)
-        welcome_owner = (
-            f"🎉 أهلاً بك يا {message.author.name}!\n\n"
-            f"تم تسجيل حسابك كمالك ومتحكم وحيد بالبوت بنجاح.\n"
-            f"معرّفك (User ID): `{message.author.id}`\n"
-            "الآن يمكنك إرسال أي طلب وسينفذه جهازك فوراً!"
-        )
-        await message.reply(welcome_owner)
+    # Handle Pairing Command (!pair 123456 or ربط 123456)
+    pair_match = re.search(r'^(?:!pair|/pair|ربط)\s*(\d+)', text, re.I)
+    if pair_match:
+        entered_code = pair_match.group(1).strip()
+        if pairing_code and entered_code == pairing_code:
+            if sender_id not in allowed:
+                allowed.append(sender_id)
+                cfg["discord"]["allowed_user_ids"] = allowed
+                cfg["discord"]["pairing_code"] = str(secrets.randbelow(900000) + 100000)
+                save_config(cfg)
+            await message.reply(
+                f"🎉 **تم توثيق وربط جهازك بنجاح!**\n\nأهلاً بك يا {message.author.name}، حسابك معتمد الآن كمالك ومتحكم رئيسي.\nمعرّفك (User ID): `{sender_id}`\n\nيمكنك الآن إرسال أي طلب وسينفذه جهازك فوراً!"
+            )
+            return
+        else:
+            await message.reply("❌ كود الربط غير صحيح أو انتهت صلاحيته. يرجى التحقق من الكود الظاهر في شاشة جهازك.")
+            return
 
     # Security check
-    if message.author.id not in allowed:
-        await message.reply("⛔ عذراً، هذا البوت شخصي ومخصص للتحكم بجهاز الكمبيوتر الخاص بمالكه فقط.")
+    if sender_id not in allowed:
+        await message.reply(
+            "🔒 **هذا البوت مقفل لأمان جهاز الكمبيوتر الخاص بك.**\n\n"
+            "لربط حسابك وتفعيله، احصل على كود الربط المكوّن من 6 أرقام من نافذة تشغيل البوت على جهازك، ثم أرسل:\n"
+            "`!pair <الكود>`\n\n"
+            f"معرّفك الشخصي (User ID): `{sender_id}`"
+        )
         return
 
     # Processing indicator with immediate message

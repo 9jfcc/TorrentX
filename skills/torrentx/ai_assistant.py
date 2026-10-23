@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import requests
 import os
 import sys
@@ -39,7 +40,14 @@ QBITTORRENT_PATH = r"C:\Program Files\qBittorrent\qbittorrent.exe"
 # GENERAL STREAM & TORRENT RESOLVER (DIRECT REAL-DEBRID + QBITTORRENT)
 # ==============================================================================
 
+# Extended phonetic mapping for anime franchises & movies
 PHONETIC_ANIME_MAP = {
+    'فيت ستاي نايت': 'Fate/stay night',
+    'فيت/ستاي نايت': 'Fate/stay night',
+    'فيت سترينج فيك': 'Fate/strange Fake',
+    'فيت سترينج': 'Fate/strange Fake',
+    'فيت زيرو': 'Fate/Zero',
+    'فيت ابوكريفا': 'Fate/Apocrypha',
     'فيت': 'Fate',
     'سترينج': 'strange',
     'فيك': 'Fake',
@@ -77,7 +85,6 @@ def get_imdb_id(title, is_series=True):
     preferred_type = "tv" if is_series else "movie"
     fallback_result = None
 
-    import requests
     for lang in ["en-US", "ar"]:
         clean_q = urllib.parse.quote(query)
         url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_key}&query={clean_q}&include_adult=false&language={lang}"
@@ -140,7 +147,7 @@ def get_torrentio_streams(imdb_id, season=1, episode=1, is_series=True, rd_api_k
         return []
 
 def translate_query_for_search(text):
-    """Extracts title, season, episode, quality, and Debrid preference without any hardcoded titles."""
+    """Extracts title, season, episode, quality, codecs, and Debrid preference."""
     is_series = any(w in text for w in ["مسلسل", "حلقة", "الحلقة", "الموسم", "موسم", "series", "episode", "season", "s0", "e0", "s1", "s2"])
     
     # Check Debrid preference
@@ -158,15 +165,30 @@ def translate_query_for_search(text):
     elif any(k in text_lower for k in ["مع ابسكيل", "ابسكيل", "upscale", "ai upscale", "topaz"]):
         want_upscale = True
 
-    # Parse episode number safely
+    # Comprehensive Arabic Episode Ordinals (1 through 30+)
     s_num, e_num = 1, 1
     ep_patterns = [
+        (r'(?:الحادية\s*عشرة|الحادية\s*عشر|eleventh\s+episode|e0?11)', 11),
+        (r'(?:الثانية\s*عشرة|الثانية\s*عشر|twelfth\s+episode|e0?12)', 12),
+        (r'(?:الثالثة\s*عشرة|الثالثة\s*عشر|thirteenth\s+episode|e0?13)', 13),
+        (r'(?:الرابعة\s*عشرة|الرابعة\s*عشر|fourteenth\s+episode|e0?14)', 14),
+        (r'(?:الخامسة\s*عشرة|الخامسة\s*عشر|fifteenth\s+episode|e0?15)', 15),
+        (r'(?:السادسة\s*عشرة|السادسة\s*عشر|sixteenth\s+episode|e0?16)', 16),
+        (r'(?:السابعة\s*عشرة|السابعة\s*عشر|seventeenth\s+episode|e0?17)', 17),
+        (r'(?:الثامنة\s*عشرة|الثامنة\s*عشر|eighteenth\s+episode|e0?18)', 18),
+        (r'(?:التاسعة\s*عشرة|التاسعة\s*عشر|nineteenth\s+episode|e0?19)', 19),
+        (r'(?:العشرون|العشرين|twentieth\s+episode|e0?20)', 20),
+        (r'(?:العاشرة|tenth\s+episode|e0?10)', 10),
+        (r'(?:التاسعة|ninth\s+episode|e0?9)', 9),
+        (r'(?:الثامنة|eighth\s+episode|e0?8)', 8),
+        (r'(?:السابعة|seventh\s+episode|e0?7)', 7),
+        (r'(?:السادسة|sixth\s+episode|e0?6)', 6),
+        (r'(?:الخامسة|fifth\s+episode|e0?5)', 5),
+        (r'(?:الرابعة|fourth\s+episode|e0?4)', 4),
+        (r'(?:الثالثة|third\s+episode|e0?3)', 3),
+        (r'(?:الثانية|second\s+episode|e0?2)', 2),
+        (r'(?:الاولى|الأولى|first\s+episode|e0?1)', 1),
         (r'(?:الحلقة|حلقة|ep|episode)\s*(\d+)', None),
-        (r'(?:الاولى|الأولى|first\s+episode|\be0?1\b)', 1),
-        (r'(?:الثانية|second\s+episode|\be0?2\b)', 2),
-        (r'(?:الثالثة|third\s+episode|\be0?3\b)', 3),
-        (r'(?:الرابعة|fourth\s+episode|\be0?4\b)', 4),
-        (r'(?:الخامسة|fifth\s+episode|\be0?5\b)', 5),
     ]
     for pat, val in ep_patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -174,13 +196,18 @@ def translate_query_for_search(text):
             e_num = val if val is not None else int(m.group(1))
             break
 
-    # Parse season safely (support Arabic & English ordinals e.g. Second Season / الموسم الثاني)
+    # Comprehensive Arabic Season Ordinals (1 through 10+)
     season_patterns = [
-        (r'(?:second\s+season|2nd\s+season|الموسم\s+الثاني|\bs0?2\b)', 2),
-        (r'(?:third\s+season|3rd\s+season|الموسم\s+الثالث|\bs0?3\b)', 3),
-        (r'(?:fourth\s+season|4th\s+season|الموسم\s+الرابع|\bs0?4\b)', 4),
-        (r'(?:fifth\s+season|5th\s+season|الموسم\s+الخامس|\bs0?5\b)', 5),
-        (r'(?:first\s+season|1st\s+season|الموسم\s+(?:الأول|الاول)|\bs0?1\b)', 1),
+        (r'(?:الموسم\s+العاشر|tenth\s+season|10th\s+season|s0?10)', 10),
+        (r'(?:الموسم\s+التاسع|ninth\s+season|9th\s+season|s0?9)', 9),
+        (r'(?:الموسم\s+الثامن|eighth\s+season|8th\s+season|s0?8)', 8),
+        (r'(?:الموسم\s+السابع|seventh\s+season|7th\s+season|s0?7)', 7),
+        (r'(?:الموسم\s+السادس|sixth\s+season|6th\s+season|s0?6)', 6),
+        (r'(?:الموسم\s+الخامس|fifth\s+season|5th\s+season|s0?5)', 5),
+        (r'(?:الموسم\s+الرابع|fourth\s+season|4th\s+season|s0?4)', 4),
+        (r'(?:الموسم\s+الثالث|third\s+season|3rd\s+season|s0?3)', 3),
+        (r'(?:الموسم\s+الثاني|second\s+season|2nd\s+season|s0?2)', 2),
+        (r'(?:الموسم\s+(?:الأول|الاول)|first\s+season|1st\s+season|s0?1)', 1),
         (r'(?:الموسم|موسم|season)\s*(\d+)', None),
     ]
     for pat, val in season_patterns:
@@ -190,14 +217,14 @@ def translate_query_for_search(text):
             break
 
     quality = "4K" if ("4k" in text.lower() or "2160" in text) else ("1080p" if "1080" in text else "Any")
-    want_remux = bool(re.search(r'\b(remux|remxu|remx|ريمكس)\b', text, re.I))
-    want_crunchyroll = bool(re.search(r'(?:كرانشي(?:\s*رول)?|كرانشيرول|crunchyroll|\bcr\b)', text, re.I))
+    want_remux = bool(re.search(r'(remux|remxu|remx|ريمكس)', text, re.I))
+    want_crunchyroll = bool(re.search(r'(?:كرانشي(?:\s*رول)?|كرانشيرول|crunchyroll|cr)', text, re.I))
     want_uncompressed = bool(re.search(r'(?:بدون\s*ضغط|غير\s*مضغوط|raw|remux|اعلى\s*جودة|أعلى\s*جودة)', text, re.I))
-    want_av1 = bool(re.search(r'\b(av1|av01)\b', text, re.I))
-    want_h264 = bool(re.search(r'\b(h264|x264|avc|h\.264)\b', text, re.I))
-    want_hevc = bool(re.search(r'\b(h265|x265|hevc|h\.265)\b', text, re.I))
-    want_bluray = bool(re.search(r'\b(bluray|blu-ray|bdrip|بلوراي)\b', text, re.I))
-    want_web = bool(re.search(r'\b(web-?dl|webrip|ويب)\b', text, re.I)) or want_crunchyroll
+    want_av1 = bool(re.search(r'(av1|av01)', text, re.I))
+    want_h264 = bool(re.search(r'(h264|x264|avc|h\.264)', text, re.I))
+    want_hevc = bool(re.search(r'(h265|x265|hevc|h\.265)', text, re.I))
+    want_bluray = bool(re.search(r'(bluray|blu-ray|بلوراي)', text, re.I))
+    want_web = bool(re.search(r'(web-?dl|webrip|ويب)', text, re.I)) or want_crunchyroll
 
     # Detect explicit release groups requested by user
     explicit_groups = []
@@ -212,7 +239,7 @@ def translate_query_for_search(text):
         'qxr': ['qxr']
     }
     for grp_key, grp_aliases in known_groups.items():
-        if any(re.search(rf'\b{re.escape(a)}\b', text, re.I) or a in text for a in grp_aliases):
+        if any(re.search(rf'{re.escape(a)}', text, re.I) or a in text for a in grp_aliases):
             explicit_groups.append(grp_key)
 
     tech_words = [
@@ -223,17 +250,25 @@ def translate_query_for_search(text):
     ]
     arabic_stopwords = [
         "حمل", "لي", "الحلقة", "حلقة", "الاولى", "الأولى", "الثانية", "الثالثة", "الرابعة", "الخامسة",
-        "الموسم", "موسم", "الثاني", "الثالث", "الرابع", "الخامس", "مسلسل", "فلم", "فيلم", "انمي", "أنمي",
+        "السادسة", "السابعة", "الثامنة", "التاسعة", "العاشرة", "الحادية", "الثانية", "عشرة", "عشر",
+        "الموسم", "موسم", "الثاني", "الثالث", "الرابع", "الخامس", "العاشر", "مسلسل", "فلم", "فيلم", "انمي", "أنمي",
         "ريمكس", "من", "عن", "مع", "ترجمه", "ترجمة", "عربية", "عربي", "داخل", "وضبط", "التوقيت", "وشف",
         "اذا", "فيه", "نسخه", "نسخة", "ولو", "مافيه", "بلوراي", "عطني", "معلوماتها", "كم", "حجمها", "وزي",
         "كذا", "وحملها", "في", "مجلد", "عبر", "ديبرد", "بدون", "شغل", "افتح", "عله", "علة", "لقيتها",
         "ابسكيل", "ذكاء", "اصطناعي", "اصلية", "أصلية", "غلط", "ضبط", "اذا", "إذا", "حمله", "حملها", "توقيتها",
-        "كرانشي", "رول", "كرانشيرول", "ضغط", "غير", "مضغوط"
+        "كرانشي", "رول", "كرانشيرول", "ضغط", "غير", "مضغوط", "ابحث", "بحث", "فقط", "لا", "تحمل", "تنزل",
+        "ولا", "ما", "لم", "لن", "أي", "اي", "شيء", "شئ", "منه", "منها", "خلاص", "بس"
     ]
 
-    # Priority 1: Match title right after 'انمي' or 'مسلسل' or 'فلم' or 'فيلم'
+    # Pre-resolve phonetic anime names
+    text_pre_trans = text
+    for ar, en in PHONETIC_ANIME_MAP.items():
+        if ar in text_pre_trans:
+            text_pre_trans = text_pre_trans.replace(ar, en)
+
     title = None
-    m_prefix = re.search(r'(?:انمي|أنمي|مسلسل|فلم|فيلم)\s+([^\,\;\.\n\r]+)', text)
+    # Priority 1: Match title right after 'انمي' or 'مسلسل' or 'فلم' or 'فيلم'
+    m_prefix = re.search(r'(?:انمي|أنمي|مسلسل|فلم|فيلم)\s+([^,;.\n\r]+)', text_pre_trans)
     if m_prefix:
         raw_cand = m_prefix.group(1).split()
         cand_tokens = []
@@ -245,9 +280,9 @@ def translate_query_for_search(text):
         if cand_tokens:
             title = " ".join(cand_tokens)
 
-    # Priority 2: English words
+    # Priority 2: English tokens (allow / for Fate/stay night)
     if not title:
-        en_words = [w for w in re.findall(r'[a-zA-Z0-9_\-\.]{2,}', text) if w.lower() not in tech_words and not w.isdigit()]
+        en_words = [w for w in re.findall(r'[a-zA-Z0-9_\-\.\/]{2,}', text_pre_trans) if w.lower() not in tech_words and not w.isdigit()]
         if en_words:
             title = " ".join(en_words)
 
@@ -258,7 +293,7 @@ def translate_query_for_search(text):
         title = " ".join([t for t in ar_title_tokens if t])
         
     return {
-        "title": title or "11.22.63",
+        "title": title or "Dune",
         "is_series": is_series,
         "season": s_num,
         "episode": e_num,
@@ -276,6 +311,103 @@ def translate_query_for_search(text):
         "want_upscale": want_upscale
     }
 
+def get_candidate_resolution(text):
+    t = text.lower()
+    if any(w in t for w in ["2160p", "4k", "uhd"]):
+        return "4K"
+    if any(w in t for w in ["1080p", "1080i", "fhd"]):
+        return "1080p"
+    if any(w in t for w in ["720p", "hd"]):
+        return "720p"
+    if any(w in t for w in ["480p", "576p", "dvd", "sd"]):
+        return "480p"
+    return "Unknown"
+
+def get_candidate_edition(c):
+    comb = (c.get("title", "") + " " + c.get("full_desc", "")).lower()
+    if c.get("is_upscaled"):
+        return "معالجة بالذكاء الاصطناعي (AI Upscale)"
+    if c.get("is_remux"):
+        return "بلوراي أصلي كامل (Remux)"
+    if "bdrip" in comb or "brrip" in comb or "bluray-rip" in comb:
+        return "ريـب بلوراي مضغوط (BDRip)"
+    if "web-dl" in comb or "webdl" in comb or "web-rip" in comb or "webrip" in comb or c.get("is_crunchyroll"):
+        return "نسخة ويب رقمية (WEB-DL)"
+    if "hdtv" in comb:
+        return "بث تلفزيوني (HDTV)"
+    if "bluray" in comb or "blu-ray" in comb:
+        return "نسخة بلوراي قياسية (BluRay)"
+    if "dvd" in comb:
+        return "نسخة ديفيدي (DVD)"
+    return "نسخة رقمية قياسية"
+
+def handle_search_only(user_prompt):
+    """
+    Search-only pipeline: Fetches top releases from TMDB/Torrentio and presents
+    a clean structured Markdown table without triggering any download.
+    """
+    info = translate_query_for_search(user_prompt)
+    is_series = info["is_series"]
+    imdb_id, canonical_name = get_imdb_id(info["title"], is_series=is_series)
+    if not imdb_id and not is_series:
+        imdb_id, canonical_name = get_imdb_id(info["title"], is_series=True)
+        is_series = True
+        
+    if not imdb_id:
+        return True, f"عذراً، لم أتمكن من العثور على `{info['title']}` في قواعد البيانات العالمية. يرجى التحقق من كتابة الاسم بدقة."
+
+    cfg = debrid_manager.load_config() if debrid_manager else {}
+    rd_key = cfg.get("services", {}).get("realdebrid", {}).get("api_key", "")
+    streams = get_torrentio_streams(imdb_id, season=info["season"], episode=info["episode"], is_series=is_series, rd_api_key=rd_key)
+    if not streams:
+        streams = get_torrentio_streams(imdb_id, season=info["season"], episode=info["episode"], is_series=is_series, rd_api_key=None)
+
+    if not streams:
+        return True, f"🔍 لم يتم العثور على روابط تورنت نشطة لـ **{canonical_name}** حالياً."
+
+    rows = []
+    seen = set()
+    for s in streams[:20]:
+        desc = s.get("title", "")
+        name = s.get("name", "")
+        direct_url = s.get("url")
+        is_rd_cached = "[RD+]" in name or (direct_url and "resolve/realdebrid" in direct_url)
+        lines = [l.strip() for l in desc.split("\n") if l.strip()]
+        clean_name = lines[0]
+        for l in lines:
+            if l.endswith(".mkv") or l.endswith(".mp4"):
+                clean_name = l
+                break
+        if clean_name in seen:
+            continue
+        seen.add(clean_name)
+
+        size_m = re.search(r'([0-9\.]+)\s*(GB|MB)', desc, re.I)
+        size_str = size_m.group(0) if size_m else "غير محدد"
+        comb = (clean_name + " " + desc).lower()
+        res_str = "4K UHD" if ("4k" in comb or "2160p" in comb) else ("1080p FHD" if "1080p" in comb else ("720p HD" if "720p" in comb else "SD"))
+        ed_str = "Remux" if "remux" in comb else ("WEB-DL" if "web" in comb else ("BDRip" if "bdrip" in comb else "BluRay"))
+        cache_status = "⚡ كاش فوري (RD+)" if is_rd_cached else "⏳ تورنت P2P"
+        rows.append((clean_name, f"{res_str} ({ed_str})", size_str, cache_status))
+        if len(rows) >= 6:
+            break
+
+    ep_txt = f" (الموسم {info['season']} - الحلقة {info['episode']})" if is_series else ""
+    table_lines = [
+        f"🔍 **نتائج البحث لـ [{canonical_name}]{ep_txt}:**",
+        "*(تم إجراء البحث فقط دون بدء أي تنزيل بناءً على طلبك)*\n",
+        "| # | الإصدار (Release) | الجودة والنوع | الحجم | حالة الكاش السحابي |",
+        "|---|---|---|---|---|"
+    ]
+    for idx, (r_name, r_qual, r_size, r_cache) in enumerate(rows, 1):
+        table_lines.append(f"| {idx} | ‪{r_name[:52]}...‬ | {r_qual} | {r_size} | {r_cache} |")
+
+    table_lines.append("\n💡 **لتحميل أو مشاهدة أي من هذه النسخ:**")
+    table_lines.append("• للتحميل: اكتب `حمل النسخة رقم 1` أو `حمل نسخة 4k remux`")
+    table_lines.append("• للمشاهدة المباشرة: اكتب `شغل النسخة رقم 2`")
+
+    return True, "\n".join(table_lines)
+
 def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_upscale=False):
     """Autonomous search, selection, and download pipeline with zero hardcoded titles."""
     exact_sub = None
@@ -286,10 +418,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
     # Prompt preference overrides UI checkbox
     if info.get("want_upscale") is not None:
         allow_upscale = info["want_upscale"]
-    """Autonomous search, selection, and download pipeline with zero hardcoded titles."""
-    info = translate_query_for_search(user_prompt)
-    is_series = info["is_series"]
-    
+
     imdb_id, canonical_name = get_imdb_id(info["title"], is_series=is_series)
     if not imdb_id and not is_series:
         imdb_id, canonical_name = get_imdb_id(info["title"], is_series=True)
@@ -348,8 +477,13 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         
         is_rd_cached = "[RD+]" in name or (direct_url and "resolve/realdebrid" in direct_url)
         is_upscaled = any(w in desc.lower() or w in name.lower() for w in ["upscale", "upscaled", "ai upscale", "ai-upscale", "topaz", "4320p", "8k"])
-        is_4k = any(w in desc.lower() or w in name.lower() for w in ["4k", "2160p", "uhd"]) and not is_upscaled
-        is_remux = ("remux" in desc.lower() or "remux" in name.lower()) and not is_upscaled
+        
+        cand_res = get_candidate_resolution(combined_text)
+        is_4k = (cand_res == "4K") and not is_upscaled
+        
+        # Strict Remux parsing: bdrip/bluray rip is strictly NOT Remux!
+        is_remux = bool(re.search(r'\b(remux|bdremux|uhd[-\s]?remux)\b', combined_text, re.I)) and not is_upscaled
+        is_bdrip = bool(re.search(r'\b(bdrip|brrip|bluray[-\s]?rip)\b', combined_text, re.I))
         is_web = any(w in desc.lower() for w in ["web", "webrip", "web-dl", "hmax", "amzn", "dsnp", "atvp", "nf", "max"]) and not is_upscaled
         is_hdr = any(w in desc.lower() or w in name.lower() for w in ["hdr", "dv", "dolby vision"])
         is_foreign_dub = is_foreign_audio_dub(combined_text)
@@ -361,7 +495,9 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         matches_explicit_group = any(g in combined_text for g in info.get("explicit_groups", []))
         has_arabic_tag = "🇸🇦" in combined_text or bool(re.search(r"\b(arabic|ara|ar)\b", combined_text)) or "ar]" in combined_text
         has_multi_subs = "multi subs" in combined_text or "multisub" in combined_text or "multi-sub" in combined_text
-        is_lossless_or_remux = is_remux or any(w in combined_text for w in ["web-dl avc", "web-dl aac2.0 h.264", "web-dl h.264", "blu-ray", "bluray", "bdrip"])
+        
+        # Untouched / Lossless Disc
+        is_lossless = is_remux
 
         # Extract clean filename
         lines = [l.strip() for l in desc.split("\n") if l.strip()]
@@ -387,10 +523,12 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             "full_desc": desc,
             "hash": info_hash,
             "direct_url": direct_url,
+            "res": cand_res,
             "is_rd_cached": is_rd_cached,
             "is_upscaled": is_upscaled,
             "is_4k": is_4k,
             "is_remux": is_remux,
+            "is_bdrip": is_bdrip,
             "is_web": is_web,
             "is_hdr": is_hdr,
             "is_foreign_dub": is_foreign_dub,
@@ -401,7 +539,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             "matches_explicit_group": matches_explicit_group,
             "has_arabic_tag": has_arabic_tag,
             "has_multi_subs": has_multi_subs,
-            "is_lossless_or_remux": is_lossless_or_remux,
+            "is_lossless": is_lossless,
             "size": size_str,
             "seeders": seeders,
             "magnet": mag
@@ -432,11 +570,11 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         # AV1 Penalty (unless user specifically asked for AV1)
         if c["is_av1"]:
             if not info.get("want_av1"):
-                score -= 1500  # Strongly avoid heavily-compressed AV1
+                score -= 1500
             else:
                 score += 800
 
-        # Massive Priority for Explicit Release Groups requested by user
+        # Release Groups Priority
         if info.get("explicit_groups"):
             if c.get("matches_explicit_group"):
                 score += 6000
@@ -460,30 +598,27 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         if info.get("want_crunchyroll"):
             if c["is_crunchyroll"]:
                 score += 3500
-            # If user explicitly asked for Crunchyroll WEB-DL, heavily penalize Blu-ray Remux!
-            if c["is_remux"]:
+            if c["is_remux"] or c.get("is_bdrip"):
                 score -= 4000
 
-        # Uncompressed / Remux preference (only if user did not request Crunchyroll WEB-DL)
+        # Remux / Lossless Disc Preference
         if (info.get("want_uncompressed") or info.get("want_remux")) and not info.get("want_crunchyroll"):
             if c["is_remux"]:
-                score += 1200
-            elif c["is_lossless_or_remux"]:
-                score += 800
+                score += 1500
             elif "web-dl" in c["full_desc"].lower():
-                score += 500
+                score += 400
             if "webrip" in c["full_desc"].lower():
                 score -= 300
 
         # Resolution match
         if info["quality"] == "4K":
             if c["is_4k"]:
-                score += 800
+                score += 1200
             else:
-                score -= 400
+                score -= 800
         elif info["quality"] == "1080p":
-            if not c["is_4k"]:
-                score += 400
+            if c["res"] == "1080p":
+                score += 600
 
         # Subtitle tags inside torrent stream
         if c["has_arabic_tag"]:
@@ -513,26 +648,64 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
 
         c["score"] = score
 
-    valid_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-    best = valid_candidates[0] if valid_candidates else candidates[0]
+    # ==============================================================================
+    # HARD ACCEPTANCE CRITERIA:
+    # If the user explicitly requested 4K, Remux, Crunchyroll, or H.264,
+    # non-matching candidates can NEVER win just because they have a cache bonus!
+    # ==============================================================================
+    user_wants_remux = info.get("want_remux")
+    user_wants_4k = (info.get("quality") == "4K")
+    user_wants_1080p = (info.get("quality") == "1080p")
+    user_wants_cr = info.get("want_crunchyroll")
+    user_wants_h264 = info.get("want_h264")
+    user_wants_hevc = info.get("want_hevc")
+    user_has_groups = bool(info.get("explicit_groups"))
 
-    # Check if user requested an explicit release group or codec and if it is not cached
-    user_has_explicit_spec = bool(info.get("explicit_groups") or (info.get("want_crunchyroll") and info.get("want_h264")))
-    if user_has_explicit_spec and use_debrid:
-        # Check if best matching candidate for this explicit spec is cached in Real-Debrid
-        if not best.get("is_rd_cached"):
-            cached_alts = [c for c in candidates if c.get("is_rd_cached") and not c.get("is_foreign_dub")]
+    user_has_strict_spec = (
+        user_wants_remux or user_wants_4k or user_wants_1080p or
+        user_wants_cr or user_wants_h264 or user_wants_hevc or user_has_groups
+    )
+
+    def matches_strict_criteria(c):
+        if user_wants_remux and not c.get("is_remux"):
+            return False
+        if user_wants_4k and c.get("res") != "4K":
+            return False
+        if user_wants_1080p and c.get("res") != "1080p":
+            return False
+        if user_wants_cr and (c.get("is_remux") or c.get("is_bdrip")):
+            return False
+        if user_wants_h264 and not c.get("is_h264"):
+            return False
+        if user_wants_hevc and not c.get("is_hevc"):
+            return False
+        if user_has_groups and not c.get("matches_explicit_group"):
+            return False
+        return True
+
+    strict_pool = [c for c in valid_candidates if matches_strict_criteria(c)] if user_has_strict_spec else valid_candidates
+
+    if user_has_strict_spec and strict_pool:
+        strict_pool.sort(key=lambda x: x.get("score", 0), reverse=True)
+        best = strict_pool[0]
+
+        # If user is in Debrid mode, but their exact strict request is not cached:
+        if use_debrid and not best.get("is_rd_cached"):
+            cached_alts = [c for c in valid_candidates if c.get("is_rd_cached") and not c.get("is_foreign_dub")]
             if cached_alts:
                 best_cached = cached_alts[0]
-                alt_type = "بلوراي (Blu-ray / Remux)" if best_cached.get("is_remux") else "نسخة أخرى"
-                spec_label = " ".join([g.upper() for g in info.get("explicit_groups", [])])
-                if info.get("want_crunchyroll"):
-                    spec_label += " Crunchyroll"
-                if info.get("want_h264"):
-                    spec_label += " H.264"
-                
+                alt_type = get_candidate_edition(best_cached)
+                spec_label_parts = []
+                if user_wants_4k: spec_label_parts.append("4K UHD")
+                if user_wants_1080p: spec_label_parts.append("1080p")
+                if user_wants_remux: spec_label_parts.append("Remux")
+                if user_wants_cr: spec_label_parts.append("Crunchyroll")
+                if user_wants_h264: spec_label_parts.append("H.264")
+                if user_has_groups: spec_label_parts.extend([g.upper() for g in info.get("explicit_groups", [])])
+                spec_label = " ".join(spec_label_parts) or "المطلوبة"
+
                 notice_msg = (
-                    f"⚠️ **تنبيه:** النسخة المطلوبة تحديداً (`{spec_label.strip()}`) متوفرة كتورنت ولكنها **غير مخزنة سحابياً (Not Cached) في Real-Debrid حالياً**.\n\n"
+                    f"⚠️ **تنبيه:** النسخة المطلوبة تحديداً (`{spec_label}`) متوفرة كتورنت ولكنها **غير مخزنة سحابياً (Not Cached) في Real-Debrid حالياً**.\n\n"
                     f"• **النسخة التي طلبتها (تورنت عادي P2P عبر qBittorrent):**\n"
                     f"  \u202A{best['title']}\u202C ({best['size']})\n\n"
                     f"• **النسخة البديلة المتوفرة كاش سحابي فوري (Aria2):**\n"
@@ -542,6 +715,9 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                     f"2. إذا أردت تنزيل النسخة السحابية المتوفرة فوراً بأقصى سرعة، اطلب: `حمل النسخة الكاش`."
                 )
                 return True, notice_msg
+    else:
+        valid_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+        best = valid_candidates[0] if valid_candidates else candidates[0]
 
     # Subtitle search & download
     sub_status = "جاري التحقق..."
@@ -559,7 +735,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             if is_series and all_subs:
                 s_idx = info['season']
                 e_idx = info['episode']
-                ep_patterns = [
+                ep_sub_patterns = [
                     re.compile(rf"s0*{s_idx}\s*e0*{e_idx}\b", re.I),
                     re.compile(rf"{s_idx}x0*{e_idx}\b", re.I),
                     re.compile(rf"s0*{s_idx}\s*[-_]\s*0*{e_idx}\b", re.I),
@@ -571,7 +747,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                 matched_subs = []
                 for s in all_subs:
                     s_name = s.get("name") or ""
-                    for p in ep_patterns:
+                    for p in ep_sub_patterns:
                         if p.search(s_name):
                             matched_subs.append(s)
                             break
@@ -586,7 +762,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             elif all_subs:
                 target_sub = all_subs[0]
             else:
-                target_sub = all_subs[0] if all_subs else None
+                target_sub = None
 
             if target_sub:
                 out_d = os.path.expanduser(r"~\Downloads")
@@ -608,36 +784,30 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                     # Check if matching local video exists in Downloads
                     local_v = None
                     for f in os.listdir(out_d):
-                        if f.lower().endswith((".mkv", ".mp4", ".avi")) and (canonical_name.lower() in f.lower() or video_stem.lower() in f.lower()):
+                        if f.lower().endswith((".mkv", ".mp4", ".avi", ".ts")) and (canonical_name.lower() in f.lower() or video_stem.lower() in f.lower()):
                             local_v = os.path.join(out_d, f)
                             break
-                    # Launch background auto-sync watcher that runs the moment the video finishes downloading
-                    def _watch_and_sync(v_name, s_path):
-                        for _ in range(90):
-                            time.sleep(8)
-                            v_stem_w = os.path.splitext(v_name)[0]
-                            try:
-                                # Clean up any 0-byte leftover or extensionless temporary files
-                                # Clean temp aria2 files only if aborted
 
-                                for f in os.listdir(out_d):
-                                    if v_stem_w.lower() in f.lower() and f.lower().endswith((".mkv", ".mp4", ".avi")):
-                                        aria_t = os.path.join(out_d, f"{f}.aria2")
-                                        v_full = os.path.join(out_d, f)
-                                        if not os.path.exists(aria_t) and os.path.exists(v_full) and os.path.getsize(v_full) > 50 * 1024 * 1024:
-                                            if subtitle_manager and os.path.exists(s_path):
-                                                subtitle_manager.sync_subtitle_with_autosubsync(v_full, s_path, output_path=s_path)
-                                            return
-                            except Exception:
-                                pass
-                    threading.Thread(target=_watch_and_sync, args=(best["title"], exact_sub), daemon=True).start()
+                    # Launch detached background watcher for audio sync completion
+                    watcher_py = os.path.join(SKILL_DIR, "sync_watcher.py")
+                    if os.path.exists(watcher_py):
+                        try:
+                            CREATE_NO_WINDOW = 0x08000000
+                            DETACHED_PROCESS = 0x00000008
+                            subprocess.Popen(
+                                [sys.executable, watcher_py, best["title"], exact_sub],
+                                creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                                close_fds=True
+                            )
+                        except Exception:
+                            pass
 
                     if local_v:
                         sync_res = subtitle_manager.verify_and_auto_sync(local_v, exact_sub)
                         if sync_res.get("status") == "matched":
                             sub_status = f"تم تحميل الترجمة مطابقة للاسم والتوقيت تلقائياً:\n  \u202A{os.path.basename(exact_sub)}\u202C"
                         elif sync_res.get("success") and sync_res.get("output_file"):
-                            tool_used = sync_res.get("tool", "ffsubsync")
+                            tool_used = sync_res.get("tool", "alass")
                             try:
                                 shutil.copy2(sync_res['output_file'], exact_sub)
                             except Exception:
@@ -664,6 +834,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
 
     # Execute Download: Real-Debrid vs qBittorrent
     dl_status = ""
+    dl_failed = False
     engine_name = "qBittorrent"
     active_dl_client = "aria2" if "idm" not in q_lower else "idm"
 
@@ -686,11 +857,11 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                 dl_res = debrid_manager.send_to_downloader(target_url, downloader=active_dl_client, file_name=best.get("title"))
                 engine_name = "Real-Debrid + Aria2 (سحابي فائق السرعة)"
                 if dl_res and not dl_res.get("success"):
-                    dl_status = f"❌ فشل بدء التنزيل عبر المحمل: {dl_res.get('error')}"
+                    dl_failed = True
+                    dl_status = f"❌ تعذر بدء التحميل عبر المحمل: {dl_res.get('error')}"
                 else:
                     dl_status = "🚀 تم سحب الرابط السحابي وبدأ التنزيل الفوري بأقصى سرعة إنترنت (16 اتصال) عبر **Aria2** في مجلد Downloads."
         elif best.get("magnet") and debrid_manager:
-            # Clean magnet without dn spam
             clean_mag = f"magnet:?xt=urn:btih:{best['hash']}"
             rd_res = debrid_manager.add_magnet_and_resolve(
                 clean_mag,
@@ -727,7 +898,8 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                     dl_res = debrid_manager.send_to_downloader(d_url, downloader=active_dl_client, file_name=best.get("title"))
                     engine_name = "Real-Debrid + Aria2 (سحابي فائق السرعة)"
                     if dl_res and not dl_res.get("success"):
-                        dl_status = f"❌ فشل بدء التنزيل عبر المحمل: {dl_res.get('error')}"
+                        dl_failed = True
+                        dl_status = f"❌ تعذر بدء التحميل عبر المحمل: {dl_res.get('error')}"
                     else:
                         dl_status = "🚀 تم سحب الكاش عبر **Real-Debrid** وبدأ التنزيل المباشر فائق السرعة عبر **Aria2** (16 اتصال) في مجلد Downloads."
             else:
@@ -738,26 +910,30 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         mag = best.get("magnet") or (f"magnet:?xt=urn:btih:{best['hash']}" if best.get("hash") else None)
         if mag and os.path.exists(QBITTORRENT_PATH):
             subprocess.Popen([QBITTORRENT_PATH, mag])
-            engine_name = "qBittorrent"
+            engine_name = "qBittorrent (تورنت P2P)"
             dl_status = "تم فتح الرابط وبدء التنزيل فوراً داخل برنامج **qBittorrent** للمتابعة والتحكم في السييد والمشاركة."
         elif mag and debrid_manager:
             debrid_manager.send_to_downloader(mag, downloader="aria2")
             dl_status = "بدأ التنزيل المباشر في مجلد Downloads."
 
     ep_label = f"الموسم {info['season']} - الحلقة {info['episode']}" if is_series else "فيلم كامل"
-    edition_type = "نسخة أصلية خام (Studio Master)"
-    if best.get("is_upscaled"):
-        edition_type = "معالجة بالذكاء الاصطناعي (AI Upscale)"
-    elif best.get("is_remux"):
-        edition_type = "بلوراي كامل (Remux)"
-    elif best.get("is_web"):
-        edition_type = "استوديو أصلية (WEB-DL)"
+    edition_type = get_candidate_edition(best)
+    audio_label = "إنجليزي / أصلي (Original Audio)" if not best.get("is_foreign_dub") else "مدبلج بلغة أخرى"
+    
+    # Accurate resolution mapping based on true detected candidate resolution
+    res_map = {
+        "4K": "4K UHD (2160p)",
+        "1080p": "1080p Full HD",
+        "720p": "720p HD",
+        "480p": "480p SD",
+    }
+    res_label = res_map.get(best.get("res"), "جودة قياسية (Standard Definition)")
+    real_downloads_dir = os.path.expanduser(r"~\Downloads")
 
-    audio_label = "إنجليزي / أصلي (Original English Audio)" if not best.get("is_foreign_dub") else "مدبلج بلغة أخرى"
-    res_label = "4K UHD (2160p)" if best.get("is_4k") else "1080p FHD"
+    header_text = "🎯 **أبشر! تم تجهيز طلبك وبدء تحميله بنجاح:**" if not dl_failed else "⚠️ **تم العثور على الإصدار ولكن تعذر بدء التنزيل تلقائياً:**"
 
     report = (
-        f"🎯 **أبشر! قمت بالبحث وتجهيز طلبك وبدء تحميله فوراً:**\n\n"
+        f"{header_text}\n\n"
         f"• **العمل:**\n  \u202A{canonical_name}\u202C ({ep_label})\n\n"
         f"• **الإصدار المختار:**\n  \u202A{best['title']}\u202C\n\n"
         f"• **الصوت واللغة:**\n  {audio_label}\n\n"
@@ -766,7 +942,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
         f"• **حجم الملف:**\n  \u202A{best['size']}\u202C\n\n"
         f"• **طريقة التحميل:**\n  \u202A{engine_name}\u202C\n\n"
         f"• **الترجمة العربية:**\n  {sub_status}\n\n"
-        f"• **مجلد التنزيل:**\n  \u202AC:\\Users\\<username>\\Downloads\u202C\n\n"
+        f"• **مجلد التنزيل:**\n  \u202A{real_downloads_dir}\u202C\n\n"
         f"🚀 **حالة التنفيذ:**\n{dl_status}"
     )
     return True, report
@@ -776,7 +952,6 @@ def resolve_and_play_file(query_text):
     search_dirs = [
         os.path.expanduser(r"~\Downloads"),
         os.path.expanduser(r"~\Downloads\Series"),
-        os.path.expanduser(r"~\Downloads")
     ]
     video_exts = (".mkv", ".mp4", ".avi", ".ts", ".m2ts")
     
@@ -801,20 +976,44 @@ def resolve_and_play_file(query_text):
     return None
 
 def execute_user_action(user_prompt, debrid_mode="auto", allow_upscale=False):
-    """Central agent router: handles direct play, search, and autonomous download."""
+    """Central agent router: handles search-only, negative intent, direct play, and download."""
     p_lower = user_prompt.lower()
+
+    # 1. Negative Download / Search-Only Detection (Zero False Triggers)
+    has_negative_dl = any(neg in p_lower for neg in [
+        "لا تحمل", "لا تنزل", "بدون تحميل", "بدون تنزيل", "لا تحمله", "لا تنزله",
+        "ما ابغى احمل", "ما ابي احمل", "ما بدي احمل", "لا تقوم بتحميل", "من غير تحميل"
+    ])
+    has_explicit_search = any(s in p_lower for s in [
+        "ابحث فقط", "فقط ابحث", "بحث فقط", "استعلم فقط", "ابحث دون تحميل", "ابحث بدون تحميل"
+    ])
+    is_search_only = has_explicit_search or (has_negative_dl and any(w in p_lower for w in ["ابحث", "بحث", "شف", "شوف", "استعلم"]))
+
+    if is_search_only:
+        return handle_search_only(user_prompt)
+
+    # 2. General Knowledge / Recommendations (Don't trigger downloads for chit-chat questions)
+    is_general_question = any(q in p_lower for q in [
+        "وش افضل", "وش أفضل", "ما افضل", "ما أفضل", "ماهو افضل", "ما هو افضل",
+        "ما هو أفضل", "ماهو أفضل", "افضل فيلم", "أفضل فيلم", "افضل مسلسل", "أفضل مسلسل",
+        "وش قصة", "ما هي قصة", "ما قصة", "من هو", "من هم", "تقييم", "شرح فيلم", "شرح مسلسل",
+        "مين بطل", "مين الممثل", "كم تقييم", "رشح لي", "اقترح لي"
+    ])
+    if is_general_question and not any(w in p_lower for w in ["حمل", "نزله", "download", "تنزيل", "شغل", "سحب"]):
+        return False, None
+
     is_play = any(w in p_lower for w in ["شغل", "شغله", "افتح", "تشغيل", "play", "open", "تابع"])
     
     # Download detection: triggers on verbs OR media queries (series, anime, episode, movie)
     has_dl_verb = any(w in p_lower for w in [
         "حمل", "نزله", "تنزيل", "تحميل", "download", "جيب", "هات",
         "ابي", "أبي", "ابغى", "أبغى", "اريد", "أريد", "عطني", "اعطني", "ودنا", "ودّي"
-    ])
+    ]) and not has_negative_dl
+
     has_episode_season = bool(re.search(r'(?:الحلقة|حلقة|ep|episode|\be\d{1,3}\b|الموسم|موسم|season|\bs\d{1,2}\b)', user_prompt, re.I))
     has_media_intent = any(w in p_lower for w in ["انمي", "أنمي", "مسلسل", "فلم", "فيلم", "سلسلة", "movie", "series", "anime", "remux", "4k", "1080p", "بدون ضغط", "كرانشي"])
-    is_chit_chat_only = any(q in p_lower for q in ["وش قصة", "ما هي قصة", "ما قصة", "من هو", "من هم", "تقييم", "شرح فيلم", "شرح مسلسل", "مين بطل"])
 
-    is_dl = (has_dl_verb or has_episode_season or has_media_intent) and not is_chit_chat_only and not is_play
+    is_dl = (has_dl_verb or has_episode_season or has_media_intent) and not has_negative_dl and not is_play
     
     is_sync = any(w in p_lower for w in [
         "مزامنة", "مزامنه", "ضبط التوقيت", "عدل التوقيت", "توقيتها", "اضبط توقيت", "عدل توقيت",
@@ -829,7 +1028,7 @@ def execute_user_action(user_prompt, debrid_mode="auto", allow_upscale=False):
     if is_sync and not is_dl:
         out_d = os.path.expanduser(r"~\Downloads")
         if os.path.exists(out_d):
-            v_files = [os.path.join(out_d, f) for f in os.listdir(out_d) if f.lower().endswith((".mkv", ".mp4", ".avi"))]
+            v_files = [os.path.join(out_d, f) for f in os.listdir(out_d) if f.lower().endswith((".mkv", ".mp4", ".avi", ".ts"))]
             s_files = [os.path.join(out_d, f) for f in os.listdir(out_d) if f.lower().endswith((".srt", ".ass")) and not f.endswith(".synced.srt")]
             if v_files and s_files:
                 latest_v = max(v_files, key=os.path.getmtime)
@@ -837,8 +1036,7 @@ def execute_user_action(user_prompt, debrid_mode="auto", allow_upscale=False):
                 if subtitle_manager:
                     res = subtitle_manager.sync_subtitle_with_autosubsync(latest_v, latest_s)
                     if res.get("success"):
-                        tool = res.get("tool", "ffsubsync")
-                        # Keep exact matching name so MPC-HC auto-loads
+                        tool = res.get("tool", "alass")
                         v_stem = os.path.splitext(os.path.basename(latest_v))[0]
                         exact_sub = os.path.join(out_d, f"{v_stem}.srt")
                         try:
@@ -860,7 +1058,7 @@ def execute_user_action(user_prompt, debrid_mode="auto", allow_upscale=False):
     if is_play and not is_stream_request:
         file_path = resolve_and_play_file(user_prompt)
         if not file_path and any(w in user_prompt for w in ["ملف 1", "1.mkv"]):
-            def_1 = r"%USERPROFILE%\Downloads\1.mkv"
+            def_1 = os.path.expanduser(r"~\Downloads\1.mkv")
             if os.path.exists(def_1): file_path = def_1
             
         if file_path:
@@ -969,7 +1167,7 @@ def run_chat_gui():
     rb_qbit = tk.Radiobutton(mode_bar, text="عبر qBittorrent (بدون ديبرد)", variable=debrid_mode_var, value="qbittorrent", font=("Segoe UI", 8, "bold"), fg="#34d399", bg="#1e293b", selectcolor="#0f172a", activebackground="#1e293b", activeforeground="#34d399")
     rb_qbit.pack(side="left", padx=4)
 
-    # AI Upscale Checkbox (Default: False = Always prefer genuine studio master, exclude AI upscales)
+    # AI Upscale Checkbox
     allow_upscale_var = tk.BooleanVar(value=False)
     cb_upscale = tk.Checkbutton(mode_bar, text="السماح بنسخ الـ AI Upscale", variable=allow_upscale_var, font=("Segoe UI", 8), bg="#1e293b", fg="#94a3b8", selectcolor="#0f172a", activebackground="#1e293b", activeforeground="#f8fafc")
     cb_upscale.pack(side="right", padx=6)
@@ -1125,7 +1323,6 @@ def run_chat_gui():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and not (len(sys.argv) == 2 and sys.argv[1].lower() in ["--gui", "-g"]):
-        # CLI Mode: Instant execution for Antigravity, command line, and automated tools
         cmd_args = [a for a in sys.argv[1:] if not a.startswith("--")]
         cmd_text = " ".join(cmd_args) if cmd_args else sys.argv[1]
         ok, res = execute_user_action(cmd_text)

@@ -1,77 +1,75 @@
 ---
 name: torrentx
-description: Find, stream, and download movies, series, anime, and episodes with instant Real-Debrid cloud caching, high-speed Aria2 downloads, Arabic subtitles, and alass audio synchronization.
+description: Find, stream, and download movies, series, anime, and episodes with instant Real-Debrid cloud caching, high-speed Aria2 downloads, Arabic subtitles, alass audio synchronization, and deep MCP media inspection.
 ---
 
 # 🎬 TorrentX Autonomous Entertainment Skill
 
-## ⚡ THE SINGLE-COMMAND PROTOCOL (القاعدة الصارمة لتنفيذ الأوامر فوراً)
+TorrentX provides a comprehensive, dual-tier entertainment and torrent automation architecture designed for high speed, reliability, and precision.
 
-**CRITICAL INSTRUCTION FOR ALL AI ASSISTANTS & AGENTS:**
-When the user asks in natural language to download, stream without downloading, search, or play any movie, series, episode, or anime:
-> **YOU MUST PERFORM EXACTLY ONE TOOL CALL:** Run the single command below via PowerShell.
-> **DO NOT write text or pretend you downloaded it without actually executing the tool!**
+---
+
+## ⚡ Tier 1: Fast Autonomous Assistant Pipeline
+
+For user requests in natural language to **download**, **stream without downloading**, **search only**, or **play** any movie, series, episode, or anime:
+
+Execute the master assistant CLI via PowerShell:
 
 ```powershell
 python "$env:USERPROFILE\.gemini\config\skills\torrentx\ai_assistant.py" '<user prompt exactly>'
 ```
 
-### 🛑 CRITICAL WARNING AGAINST HALLUCINATION (تحذير صارم ضد الردود الوهمية):
-- **NEVER** output a message saying "أبشر تم تجهيز طلبك وبدء التحميل" without actually invoking `run_command`!
-- You MUST call `run_command` with the exact python command above.
-- The python script will perform the real download in 2 seconds and print the verified status.
-- Return the EXACT output printed by the script to the user.
-
-### 🚫 STRICT PROHIBITIONS (ممنوع منعاً باتاً):
-1. **DO NOT** inspect or read `ai_assistant.py`, `debrid_manager.py`, or any `.py` files.
-2. **DO NOT** manually test `aria2c`, check background processes, or verify configs.
-3. **DO NOT** manually query Torrentio, Real-Debrid APIs, or scrape subtitle sites.
-4. **DO NOT** write scratch scripts, test curl commands, or run step-by-step loops.
-5. **DO NOT** call MCP peer-to-peer probing tools (`find`, `inspect_torrent`), as P2P takes minutes and times out.
+### 🌟 Key Capabilities of the Master Assistant:
+1. **Natural Language Understanding & Arabic Ordinals:** Extracts franchise titles (e.g., `Fate/stay night`, `Fate/strange Fake`), season numbers, and Arabic ordinal numbers (`الأولى` to `العاشرة` to `العشرون`) with 100% precision.
+2. **Search-Only & Intent Guarding:** Phrases like `ابحث فقط`, `بدون تحميل`, or `لا تحمل` automatically invoke Search-Only mode, returning a structured Markdown table of top available releases with cache status, without initiating downloads.
+3. **Strict Preference & Quality Matching:**
+   - When the user asks for `Remux` or `4K`, matching candidates are enforced as hard acceptance criteria.
+   - If the exact requested release is not cached in Real-Debrid, the user is transparently notified and offered the choice between P2P qBittorrent download for their exact version vs. instant cached alternatives.
+4. **Instant Cloud Streaming vs. 16-Connection Downloads:**
+   - **Stream (`شغل`, `بث`, `stream`):** Unrestricts the Real-Debrid link and launches **MPC-HC** immediately with auto-loaded Arabic subtitles.
+   - **Download (`حمل`, `نزله`, `تحميل`):** Dispatches high-speed 16-connection **Aria2** download directly into `Downloads`.
+5. **Arabic Subtitles & Waveform Sync:** Fetches matching Arabic subtitles, names them identically to the video file, and runs detached background audio synchronization (`alass` / `ffsubsync`).
 
 ---
 
-### 🌟 Why this SINGLE command handles EVERYTHING in 1.5 seconds:
-`ai_assistant.py` is the unified master engine. In a single execution, it autonomously performs:
-1. **Natural Language Understanding:** Extracts title, season, and episode with 100% deterministic accuracy.
-2. **Quality & Codec Scoring:** Selects the highest quality release (Remux / 4K / 1080p untouched), excludes foreign audio dubs, and avoids low-quality AV1 unless requested.
-3. **Instant Cloud Streaming vs Download:**
-   - **Stream Request** (`شغل`, `بدون تحميل`, `stream`, `بث مباشر`): Resolves the direct Real-Debrid HTTPS link and opens **MPC-HC** immediately with Arabic subtitles loaded!
-   - **Download Request** (`حمل`, `نزله`, `تحميل`): Pulls the Real-Debrid cloud cache and launches 16-connection **Aria2** download directly into `%USERPROFILE%\Downloads`.
-4. **Arabic Subtitles & Audio Sync:** Fetches matching Arabic subtitles, names them identically to the video, and triggers `alass` waveform audio synchronization.
-5. **Report Generation:** Generates a structured, beautiful Arabic Markdown report. **Simply return its stdout output to the user!**
+## 🔬 Tier 2: Deep MCP Inspection & Verification Tools
+
+Whenever deep inspection, bitrate analysis, track verification, or P2P torrent exploration is required, agents can invoke the native TorrentX MCP tools:
+
+- `mcp_torrentx_inspect_media`: Inspect local or remote media streams, extracting true video codecs, bitrates, audio channel layouts, and embedded subtitle tracks.
+- `mcp_torrentx_inspect_torrent`: Probe torrent metadata, file lists, piece distributions, and swarm health before downloading.
+- `mcp_torrentx_find` / `mcp_torrentx_search`: Query decentralized DHT and torrent trackers directly for rare or unindexed releases.
 
 ---
 
-## 🛠️ Reference CLI Utilities (For Specific Admin Tasks Only)
+## 🛠️ Management & Bot Administration
 
-The following commands are ONLY for explicit user administrative requests:
-
-### 1. Media Player & Configuration Wizard
-- Launch Dark-Mode Setup Wizard:
+### 1. Secure Remote Bots (Telegram & Discord)
+TorrentX includes zero-idle-cost Telegram and Discord bots with PIN pairing:
+- Run all bots in the background:
   ```powershell
-  python "%USERPROFILE%\.gemini\config\skills\torrentx\setup_wizard.py"
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\run_all_bots.py" --silent
   ```
-- Preferred Player: Configured in `~/.gemini/config/debrid.json` (Default: `mpc` for MPC-HC).
+- **Security:** Each bot generates a 6-digit pairing PIN on first startup. Users authenticate via `/pair <PIN>` or `!pair <PIN>` to gain control over their personal PC.
 
-### 2. Multi-Bot Remote Manager (Telegram & Discord)
-- Run bots concurrently in background (~0% CPU/RAM):
+### 2. Configuration & Player Setup Wizard
+- Launch the Dark-Mode Setup Wizard:
   ```powershell
-  python "%USERPROFILE%\.gemini\config\skills\torrentx\run_all_bots.py" --silent
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\setup_wizard.py"
   ```
 
 ### 3. Weekly Episode Tracking (Series Monitor)
-- Add a show to automated tracking:
+- Track a new series:
   ```powershell
-  python "%USERPROFILE%\.gemini\config\skills\torrentx\series_monitor.py" add "<title>" <season> <last_ep>
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\series_monitor.py" add "<title>" <season> <last_ep>
   ```
-- Check tracked shows:
+- Check tracked series:
   ```powershell
-  python "%USERPROFILE%\.gemini\config\skills\torrentx\series_monitor.py" check
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\series_monitor.py" check
   ```
 
 ### 4. Audio Subtitle Synchronization (alass)
-- Manually sync subtitle to video:
+- Manually align subtitle to video:
   ```powershell
-  python "%USERPROFILE%\.gemini\config\skills\torrentx\subtitle_manager.py" sync "<video_path>" "<subtitle_path>"
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" sync "<video_path>" "<subtitle_path>"
   ```
