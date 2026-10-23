@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import sys
 import subprocess
@@ -5,9 +6,20 @@ import shutil
 import webbrowser
 
 PLAYER_REGISTRY = {
+    "iina": {
+        "name": "IINA (Modern macOS Player)",
+        "winget_id": None,
+        "brew_cask": "iina",
+        "official_url": "https://iina.io/",
+        "known_paths": [
+            "/Applications/IINA.app/Contents/MacOS/iina-cli",
+            "/Applications/IINA.app"
+        ]
+    },
     "mpc": {
         "name": "MPC-HC (Media Player Classic)",
         "winget_id": "clsid2.mpc-hc",
+        "brew_cask": None,
         "official_url": "https://github.com/clsid2/mpc-hc/releases",
         "known_paths": [
             r"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe",
@@ -19,6 +31,7 @@ PLAYER_REGISTRY = {
     "potplayer": {
         "name": "PotPlayer",
         "winget_id": "Daum.PotPlayer",
+        "brew_cask": None,
         "official_url": "https://potplayer.daum.net/",
         "known_paths": [
             r"C:\Program Files\DAUM\PotPlayer\PotPlayer64.exe",
@@ -28,21 +41,27 @@ PLAYER_REGISTRY = {
     "mpv": {
         "name": "MPV Player",
         "winget_id": "shinchiro.mpv",
+        "brew_cask": "mpv",
         "official_url": "https://mpv.io/installation/",
         "known_paths": [
-            r"C:\Users\username\AppData\Local\Harbor\mpv.exe",
             os.path.expanduser(r"~\AppData\Local\Harbor\mpv.exe"),
             r"C:\Program Files\mpv\mpv.exe",
-            r"C:\mpv\mpv.exe"
+            r"C:\mpv\mpv.exe",
+            "/opt/homebrew/bin/mpv",
+            "/usr/local/bin/mpv",
+            "/Applications/mpv.app"
         ]
     },
     "vlc": {
         "name": "VLC Media Player",
         "winget_id": "VideoLAN.VLC",
+        "brew_cask": "vlc",
         "official_url": "https://www.videolan.org/vlc/",
         "known_paths": [
             r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            "/Applications/VLC.app"
         ]
     }
 }
@@ -74,17 +93,39 @@ def check_all_players():
             "name": meta["name"],
             "installed": bool(found_path),
             "path": found_path,
-            "winget_id": meta["winget_id"],
+            "winget_id": meta.get("winget_id"),
+            "brew_cask": meta.get("brew_cask"),
             "official_url": meta["official_url"]
         }
     return status
 
-def install_player_via_winget(player_key):
-    """Installs player using Windows Package Manager in a separate console window."""
+def install_player(player_key):
+    """Installs player using Winget (Windows) or Homebrew (macOS)."""
     meta = PLAYER_REGISTRY.get(player_key.lower())
     if not meta:
         return {"success": False, "error": f"Unknown player: {player_key}"}
-        
+
+    # macOS Installation via Homebrew
+    if sys.platform == "darwin":
+        cask_name = meta.get("brew_cask")
+        if cask_name and shutil.which("brew"):
+            try:
+                cmd = ["brew", "install", "--cask", cask_name]
+                subprocess.Popen(cmd)
+                return {
+                    "success": True,
+                    "method": "brew",
+                    "player": meta["name"],
+                    "message": f"بدأ تثبيت مشغل {meta['name']} عبر Homebrew على نظام الماك."
+                }
+            except Exception as e:
+                webbrowser.open(meta["official_url"])
+                return {"success": False, "error": str(e), "url": meta["official_url"]}
+        else:
+            webbrowser.open(meta["official_url"])
+            return {"success": True, "method": "browser", "url": meta["official_url"]}
+
+    # Windows Installation via Winget
     winget_bin = shutil.which("winget") or "winget"
     cmd = [
         winget_bin, "install",
@@ -94,8 +135,7 @@ def install_player_via_winget(player_key):
     ]
     
     try:
-        # Launch winget in a new visible console so user can see progress and handle any UAC prompt
-        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0)
         return {
             "success": True,
             "method": "winget",
@@ -104,7 +144,6 @@ def install_player_via_winget(player_key):
             "message": f"بدأ تثبيت مشغل {meta['name']} عبر Windows Package Manager (winget). تابع نافذة التثبيت."
         }
     except Exception as e:
-        # Fallback to browser
         webbrowser.open(meta["official_url"])
         return {
             "success": False,
@@ -125,7 +164,7 @@ def open_official_site(player_key):
 if __name__ == "__main__":
     import json
     if len(sys.argv) > 1 and sys.argv[1] == "install" and len(sys.argv) > 2:
-        res = install_player_via_winget(sys.argv[2])
+        res = install_player(sys.argv[2])
         print(json.dumps(res, indent=2, ensure_ascii=False))
     else:
         status = check_all_players()

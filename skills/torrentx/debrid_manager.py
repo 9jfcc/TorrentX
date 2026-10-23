@@ -334,15 +334,19 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
                     aria2_cmd = shutil.which("aria2c")
                 except Exception:
                     pass
+            elif not aria2_cmd and sys.platform == "darwin":
+                try:
+                    subprocess.run(["brew", "install", "aria2"], timeout=60, capture_output=True)
+                    aria2_cmd = shutil.which("aria2c")
+                except Exception:
+                    pass
             aria2_cmd = aria2_cmd or "aria2c"
             
             # Secure sanitization of file_name to prevent any path traversal or injection
             clean_filename = None
             if file_name:
                 clean_filename = os.path.basename(file_name)
-                clean_filename = re.sub(r'[
-
-"&|<>\^%`$;]', '_', clean_filename).strip()
+                clean_filename = re.sub(r'[\r\n"&|<>\^%`$;]', '_', clean_filename).strip()
 
             cmd = [
                 aria2_cmd,
@@ -383,10 +387,10 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
                     pass
 
             if not launched:
-                creationflags = 0
                 if sys.platform == "win32":
-                    creationflags = subprocess.CREATE_NEW_CONSOLE
-                subprocess.Popen(cmd, creationflags=creationflags)
+                    subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                else:
+                    subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             return {
                 "success": True,
@@ -438,7 +442,7 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
 
     if not player or player.lower() in ["default", "none", "auto"]:
         cfg = load_config()
-        player = cfg.get("default_player", "mpc")
+        player = cfg.get("default_player", "iina" if sys.platform == "darwin" else "mpc")
     player = player.lower()
     
     # Check player binary path dynamically via player_installer
@@ -449,7 +453,17 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
     except Exception:
         pass
         
-    if player in ["mpc", "mpc-hc", "mpchc"]:
+    if player in ["iina"]:
+        if sys.platform == "darwin":
+            cmd = ["open", "-a", "IINA", video_path_or_url]
+            if subtitle_path and os.path.exists(subtitle_path):
+                cmd.extend(["--args", f"--mpv-sub-file={subtitle_path}"])
+            subprocess.Popen(cmd)
+            return {"success": True, "player": "IINA", "target": video_path_or_url, "subtitle": subtitle_path, "message": "Opened in IINA successfully"}
+        else:
+            return _handle_missing_player("iina", video_path_or_url, subtitle_path)
+
+    elif player in ["mpc", "mpc-hc", "mpchc"]:
         mpc_bin = player_bin or r"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe"
         if not os.path.exists(mpc_bin):
             # Fallback to another installed player if available
@@ -483,14 +497,27 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
             return _handle_missing_player("mpv", video_path_or_url, subtitle_path)
         
     elif player == "vlc":
-        vlc_bin = player_bin or r"C:\Program Files\VideoLAN\VLC\vlc.exe"
-        if not os.path.exists(vlc_bin):
-            return _handle_missing_player("vlc", video_path_or_url, subtitle_path)
-        cmd = [vlc_bin, video_path_or_url]
-        if subtitle_path and os.path.exists(subtitle_path):
-            cmd.append(f"--sub-file={subtitle_path}")
-        subprocess.Popen(cmd)
-        return {"success": True, "player": "VLC", "target": video_path_or_url, "subtitle": subtitle_path, "message": "Opened in VLC successfully"}
+        if sys.platform == "darwin":
+            vlc_app = "/Applications/VLC.app/Contents/MacOS/VLC"
+            if os.path.exists(vlc_app):
+                cmd = [vlc_app, video_path_or_url]
+                if subtitle_path and os.path.exists(subtitle_path):
+                    cmd.append(f"--sub-file={subtitle_path}")
+                subprocess.Popen(cmd)
+                return {"success": True, "player": "VLC", "target": video_path_or_url, "subtitle": subtitle_path, "message": "Opened in VLC successfully"}
+            else:
+                cmd = ["open", "-a", "VLC", video_path_or_url]
+                subprocess.Popen(cmd)
+                return {"success": True, "player": "VLC", "target": video_path_or_url, "subtitle": subtitle_path, "message": "Opened in VLC successfully"}
+        else:
+            vlc_bin = player_bin or r"C:\Program Files\VideoLAN\VLC\vlc.exe"
+            if not os.path.exists(vlc_bin):
+                return _handle_missing_player("vlc", video_path_or_url, subtitle_path)
+            cmd = [vlc_bin, video_path_or_url]
+            if subtitle_path and os.path.exists(subtitle_path):
+                cmd.append(f"--sub-file={subtitle_path}")
+            subprocess.Popen(cmd)
+            return {"success": True, "player": "VLC", "target": video_path_or_url, "subtitle": subtitle_path, "message": "Opened in VLC successfully"}
         
     return {"error": True, "message": f"Unknown or unsupported player: {player}. Supported: mpc, potplayer, mpv, vlc"}
 
@@ -501,7 +528,8 @@ def _handle_missing_player(requested_player, video_url_or_path, subtitle_path):
     
     # Find any installed player
     fallback = None
-    for p_key in ["mpc", "potplayer", "mpv", "vlc"]:
+    search_players = ["iina", "vlc", "mpv"] if sys.platform == "darwin" else ["mpc", "potplayer", "vlc", "mpv"]
+    for p_key in search_players:
         if p_key != requested_player and all_players.get(p_key, {}).get("installed"):
             fallback = p_key
             break

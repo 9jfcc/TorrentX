@@ -688,13 +688,18 @@ def sync_subtitle_with_autosubsync(video_path, subtitle_path, output_path=None):
         base, ext = os.path.splitext(subtitle_path)
         output_path = f"{base}.synced{ext}"
 
-    # Priority 1: alass (State-of-the-art Language-Agnostic Subtitle Synchronization with multi-split detection)
-    skill_dir = os.path.dirname(os.path.abspath(__file__))
-    alass_bat = os.path.join(skill_dir, "bin", "alass-windows64", "alass.bat")
-    if os.path.exists(alass_bat):
+    # Priority 1: alass (State-of-the-art Language-Agnostic Subtitle Synchronization)
+    alass_bin = shutil.which("alass")
+    if not alass_bin:
+        skill_dir = os.path.dirname(os.path.abspath(__file__))
+        alass_bat = os.path.join(skill_dir, "bin", "alass-windows64", "alass.bat")
+        if os.path.exists(alass_bat):
+            alass_bin = alass_bat
+
+    if alass_bin:
         try:
             convert_to_utf8_bom(subtitle_path)
-            cmd = [alass_bat, video_path, subtitle_path, output_path]
+            cmd = [alass_bin, video_path, subtitle_path, output_path]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 convert_to_utf8_bom(output_path)

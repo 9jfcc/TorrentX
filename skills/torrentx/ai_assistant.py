@@ -34,7 +34,12 @@ except ImportError:
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "qwen2.5:3b"
 
-QBITTORRENT_PATH = r"C:\Program Files\qBittorrent\qbittorrent.exe"
+if sys.platform == "darwin":
+    QBITTORRENT_PATH = "/Applications/qBittorrent.app/Contents/MacOS/qbittorrent"
+    if not os.path.exists(QBITTORRENT_PATH):
+        QBITTORRENT_PATH = "/Applications/qBittorrent.app"
+else:
+    QBITTORRENT_PATH = r"C:\Program Files\qBittorrent\qbittorrent.exe"
 
 # ==============================================================================
 # GENERAL STREAM & TORRENT RESOLVER (DIRECT REAL-DEBRID + QBITTORRENT)
@@ -792,13 +797,21 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                     watcher_py = os.path.join(SKILL_DIR, "sync_watcher.py")
                     if os.path.exists(watcher_py):
                         try:
-                            CREATE_NO_WINDOW = 0x08000000
-                            DETACHED_PROCESS = 0x00000008
-                            subprocess.Popen(
-                                [sys.executable, watcher_py, best["title"], exact_sub],
-                                creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
-                                close_fds=True
-                            )
+                            if sys.platform == "win32":
+                                CREATE_NO_WINDOW = 0x08000000
+                                DETACHED_PROCESS = 0x00000008
+                                subprocess.Popen(
+                                    [sys.executable, watcher_py, best["title"], exact_sub],
+                                    creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                                    close_fds=True
+                                )
+                            else:
+                                subprocess.Popen(
+                                    [sys.executable, watcher_py, best["title"], exact_sub],
+                                    start_new_session=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL
+                                )
                         except Exception:
                             pass
 
@@ -908,10 +921,15 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
     else:
         # Standard qBittorrent P2P
         mag = best.get("magnet") or (f"magnet:?xt=urn:btih:{best['hash']}" if best.get("hash") else None)
-        if mag and os.path.exists(QBITTORRENT_PATH):
-            subprocess.Popen([QBITTORRENT_PATH, mag])
-            engine_name = "qBittorrent (تورنت P2P)"
-            dl_status = "تم فتح الرابط وبدء التنزيل فوراً داخل برنامج **qBittorrent** للمتابعة والتحكم في السييد والمشاركة."
+        if mag:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", "qBittorrent", mag])
+                engine_name = "qBittorrent (تورنت P2P)"
+                dl_status = "تم فتح الرابط وبدء التنزيل فوراً داخل برنامج **qBittorrent** للمتابعة والتحكم في السييد والمشاركة."
+            elif os.path.exists(QBITTORRENT_PATH):
+                subprocess.Popen([QBITTORRENT_PATH, mag])
+                engine_name = "qBittorrent (تورنت P2P)"
+                dl_status = "تم فتح الرابط وبدء التنزيل فوراً داخل برنامج **qBittorrent** للمتابعة والتحكم في السييد والمشاركة."
         elif mag and debrid_manager:
             debrid_manager.send_to_downloader(mag, downloader="aria2")
             dl_status = "بدأ التنزيل المباشر في مجلد Downloads."
@@ -1083,9 +1101,15 @@ def execute_user_action(user_prompt, debrid_mode="auto", allow_upscale=False):
                             break
 
             if debrid_manager:
-                debrid_manager.stream_to_player(file_path, subtitle_path=sub_to_use, player="mpc")
+                def_p = "iina" if sys.platform == "darwin" else "mpc"
+                debrid_manager.stream_to_player(file_path, subtitle_path=sub_to_use, player=def_p)
             else:
-                os.startfile(file_path)
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", file_path])
+                elif sys.platform == "win32":
+                    os.startfile(file_path)
+                else:
+                    subprocess.Popen(["xdg-open", file_path])
             sub_note = f"\n• **الترجمة المرفقة تلقائياً:**\n  \u202A{os.path.basename(sub_to_use)}\u202C" if sub_to_use else ""
             return True, f"🎬 **تم فتح الملف فوراً داخل مشغل MPC-HC:**\n\n• **الفيديو:**\n  \u202A{os.path.basename(file_path)}\u202C{sub_note}"
 
