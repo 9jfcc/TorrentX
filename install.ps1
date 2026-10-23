@@ -81,7 +81,7 @@ $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
 if ($pythonCmd) {
     $wizardScript = Join-Path $targetDir "setup_wizard.py"
     if (Test-Path $wizardScript) {
-        Write-Host "`n[*] Launching Interactive Setup Wizard (معالج الإعداد)...`n" -ForegroundColor Cyan
+        Write-Host "`n[*] Launching Interactive Setup Wizard...`n" -ForegroundColor Cyan
         & python $wizardScript
     }
 } else {
