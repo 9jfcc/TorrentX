@@ -323,13 +323,25 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
     if downloader == "aria2":
         try:
             import shutil
-            aria2_cmd = shutil.which("aria2c") or "aria2c"
+            aria2_cmd = shutil.which("aria2c")
+            if not aria2_cmd and sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["winget", "install", "aria2.aria2", "--source", "winget", "--silent", "--accept-source-agreements", "--accept-package-agreements"],
+                        timeout=40,
+                        capture_output=True
+                    )
+                    aria2_cmd = shutil.which("aria2c")
+                except Exception:
+                    pass
+            aria2_cmd = aria2_cmd or "aria2c"
             
             # Secure sanitization of file_name to prevent any path traversal or injection
             clean_filename = None
             if file_name:
                 clean_filename = os.path.basename(file_name)
-                clean_filename = re.sub(r'[
+                clean_filename = re.sub(r'[
+
 "&|<>\^%`$;]', '_', clean_filename).strip()
 
             cmd = [
