@@ -10,6 +10,25 @@
 
 ---
 
+## 🚀 التثبيت بأمر واحد (One-Line Quick Install)
+
+### الطريقة الأولى: عبر PowerShell (الأسهل والأسرع - لا يتطلب أي برامج إضافية)
+انسخ هذا السطر والصقه في نافذة **PowerShell** واضغط Enter:
+```powershell
+irm https://raw.githubusercontent.com/9jfcc/TorrentX/main/install.ps1 | iex
+```
+> سيقوم تلقائياً بتنزيل المهارة، وتثبيت Aria2 إذا لم تكن موجودة، وفتح معالج الإعداد التفاعلي لربط حساب Real-Debrid مباشرة!
+
+---
+
+### الطريقة الثانية: عبر Node.js / NPX
+لمحبي استخدام Node.js مثل أدوات الـ MCP:
+```powershell
+npx github:9jfcc/TorrentX
+```
+
+---
+
 ## 🌟 المميزات الرئيسية (Core Features)
 
 1. **مساعد ذكي فائق السرعة (AI Media Assistant):**

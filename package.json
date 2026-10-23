@@ -1,0 +1,32 @@
+{
+  "name": "torrentx",
+  "version": "1.0.0",
+  "description": "AI-powered media engine & Antigravity skill for movies, series, and anime.",
+  "main": "bin/setup.js",
+  "bin": {
+    "torrentx": "bin/setup.js",
+    "torrentx-setup": "bin/setup.js"
+  },
+  "scripts": {
+    "setup": "node bin/setup.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/9jfcc/TorrentX.git"
+  },
+  "keywords": [
+    "antigravity",
+    "skill",
+    "torrent",
+    "real-debrid",
+    "aria2",
+    "subtitles",
+    "mcp"
+  ],
+  "author": "9jfcc",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/9jfcc/TorrentX/issues"
+  },
+  "homepage": "https://github.com/9jfcc/TorrentX#readme"
+}
