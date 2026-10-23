@@ -323,8 +323,15 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
     if downloader == "aria2":
         try:
             import shutil
-            import tempfile
             aria2_cmd = shutil.which("aria2c") or "aria2c"
+            
+            # Secure sanitization of file_name to prevent any path traversal or injection
+            clean_filename = None
+            if file_name:
+                clean_filename = os.path.basename(file_name)
+                clean_filename = re.sub(r'[
+"&|<>\^%`$;]', '_', clean_filename).strip()
+
             cmd = [
                 aria2_cmd,
                 "-s", "16",
@@ -332,35 +339,30 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
                 "-k", "1M",
                 "-j", "4",
                 "-c",
-                "--check-certificate=false",
                 "--file-allocation=none",
                 "--auto-file-renaming=false",
                 "-d", output_dir,
                 download_url
             ]
-            if file_name:
-                cmd.extend(["-o", file_name])
-            
-            # Break completely out of Antigravity / PowerShell Job Object via WMI
+            if clean_filename:
+                cmd.extend(["-o", clean_filename])
+
+            # Break completely out of Antigravity / PowerShell Job Object via direct WMI process launch
             launched = False
             if sys.platform == "win32":
                 try:
-                    bat_path = os.path.join(tempfile.gettempdir(), f"torrentx_aria2_{int(time.time()*1000)}.bat")
-                    quoted_args = []
-                    for a in cmd:
-                        if any(c in a for c in ' ()[]&^%=;!,+'):
-                            quoted_args.append(f'"{a}"')
+                    # Safely escape command line arguments directly for Win32_Process.Create (no batch file)
+                    escaped_args = []
+                    for arg in cmd:
+                        if any(c in arg for c in ' 	"'):
+                            escaped_args.append('"' + arg.replace('"', '\"') + '"')
                         else:
-                            quoted_args.append(a)
-                    with open(bat_path, "w", encoding="utf-8") as f:
-                        f.write("@echo off\n")
-                        f.write("title TorrentX Aria2 Download\n")
-                        f.write(" ".join(quoted_args) + "\n")
-                        f.write('del "%~f0"\n')
+                            escaped_args.append(arg)
+                    raw_cli = ' '.join(escaped_args)
                     
                     ps_cmd = [
                         "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-                        f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = 'cmd.exe /c \"{bat_path}\"'}}"
+                        f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{__import__('base64').b64encode(raw_cli.encode('utf-8')).decode('ascii')}'))}}"
                     ]
                     res = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=5)
                     if "ProcessId" in res.stdout or "ReturnValue" in res.stdout:

@@ -13,7 +13,7 @@ When the user asks in natural language to download, stream without downloading, 
 > **DO NOT write text or pretend you downloaded it without actually executing the tool!**
 
 ```powershell
-python "%USERPROFILE%\.gemini\config\skills\torrentx\ai_assistant.py" "<user prompt exactly>"
+python "$env:USERPROFILE\.gemini\config\skills\torrentx\ai_assistant.py" '<user prompt exactly>'
 ```
 
 ### 🛑 CRITICAL WARNING AGAINST HALLUCINATION (تحذير صارم ضد الردود الوهمية):

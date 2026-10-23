@@ -117,23 +117,24 @@ class TelegramBot:
             return
 
         cfg = load_config()
-        allowed = cfg["telegram"].get("allowed_chat_ids", [])
+        allowed = cfg["telegram"].get("allowed_user_ids", cfg["telegram"].get("allowed_chat_ids", []))
+        sender_id = user.get("id") or chat_id
 
-        # Auto-claim: if list is empty, claim first user as authorized owner
-        if not allowed:
-            allowed.append(chat_id)
-            cfg["telegram"]["allowed_chat_ids"] = allowed
+        # Auto-claim: if list is empty, claim first direct user (not group) as authorized owner
+        if not allowed and chat.get("type") == "private":
+            allowed.append(sender_id)
+            cfg["telegram"]["allowed_user_ids"] = allowed
             save_config(cfg)
             welcome_owner = (
                 f"🎉 أهلاً بك يا {user_name}!\n\n"
                 f"تم اعتماد حسابك كمالك ومتحكم رئيسي بالبوت بنجاح.\n"
-                f"معرّفك (ID): `{chat_id}`\n\n"
+                f"معرّفك (ID): `{sender_id}`\n\n"
                 "الآن يمكنك إرسال أي طلب وسينفذه جهازك فوراً!"
             )
             self.send_message(chat_id, welcome_owner, reply_to_message_id=msg_id)
 
-        # Check authorization
-        if chat_id not in allowed:
+        # Check authorization by personal user ID
+        if sender_id not in allowed:
             self.send_message(
                 chat_id,
                 "⛔ عذراً، هذا البوت شخصي ومخصص للتحكم بجهاز الكمبيوتر الخاص بمالكه فقط.",

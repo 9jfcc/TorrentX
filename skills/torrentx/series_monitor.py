@@ -12,7 +12,7 @@ try:
 except Exception:
     pass
 
-CONFIG_PATH = r"C:\Users\username\.gemini\config\tracked_series.json"
+CONFIG_PATH = os.path.expanduser(r"~/.gemini/config/tracked_series.json")
 QBITTORRENT_PATH = r"C:\Program Files\qBittorrent\qbittorrent.exe"
 
 def load_config():

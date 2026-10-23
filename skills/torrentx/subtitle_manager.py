@@ -15,7 +15,7 @@ try:
 except Exception:
     pass
 
-CONFIG_PATH = r"C:\Users\username\.gemini\config\subtitles.json"
+CONFIG_PATH = os.path.expanduser(r"~/.gemini/config/subtitles.json")
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
@@ -30,7 +30,7 @@ def load_config():
           "subsource": {"api_key": "", "api_url": "https://subsource.net/dashboard/api"},
           "subscene": {"web_url": "https://sub-scene.com/"}
         },
-        "autosubsync_path": r"C:\Users\username\Downloads\AutoSubSync\AutoSubSync.exe",
+        "autosubsync_path": r"C:\Users\9jhp9/Downloads\AutoSubSync\AutoSubSync.exe",
         "default_language": "ar",
         "preferred_encoding": "utf-8-sig"
     }
@@ -701,7 +701,7 @@ def sync_subtitle_with_autosubsync(video_path, subtitle_path, output_path=None):
             pass
 
     # Priority 2: ffsubsync (State-of-the-art Speech / VAD recognition alignment)
-    ffs_bin = shutil.which("ffsubsync") or r"C:\Users\username\AppData\Local\Programs\Python\Python311\Scripts\ffsubsync.EXE"
+    ffs_bin = shutil.which("ffsubsync") or r"C:\Users\9jhp9\AppData\Local\Programs\Python\Python311\Scripts\ffsubsync.EXE"
     if ffs_bin and os.path.exists(ffs_bin):
         try:
             # First ensure input subtitle is clean UTF-8 BOM
@@ -724,7 +724,7 @@ def sync_subtitle_with_autosubsync(video_path, subtitle_path, output_path=None):
 
     # Priority 3: AutoSubSync.exe
     cfg = load_config()
-    exe_path = cfg.get("autosubsync_path", r"C:\Users\username\Downloads\AutoSubSync\AutoSubSync.exe")
+    exe_path = cfg.get("autosubsync_path", r"C:\Users\9jhp9/Downloads\AutoSubSync\AutoSubSync.exe")
     if os.path.exists(exe_path):
         cmd = [exe_path, video_path, subtitle_path, output_path]
         try:

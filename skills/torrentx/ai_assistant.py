@@ -1,3 +1,4 @@
+import requests
 import os
 import sys
 import json
@@ -252,6 +253,8 @@ def translate_query_for_search(text):
 
 def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_upscale=False):
     """Autonomous search, selection, and download pipeline with zero hardcoded titles."""
+    exact_sub = None
+    target_sub = None
     info = translate_query_for_search(user_prompt)
     is_series = info["is_series"]
     
@@ -328,7 +331,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
 
         is_av1 = any(w in combined_text for w in ["av1", "av01", "libaom"])
         is_crunchyroll = any(w in combined_text for w in ["crunchyroll", "cr ", "cr]", "-cr-", "erai-raws", "subsplease", "tsundere-raws"])
-        has_arabic_tag = any(w in combined_text for w in ["🇸🇦", "arabic", "ara", "ar]", "ar "])
+        has_arabic_tag = "🇸🇦" in combined_text or bool(re.search(r"\b(arabic|ara|ar)\b", combined_text)) or "ar]" in combined_text
         has_multi_subs = "multi subs" in combined_text or "multisub" in combined_text or "multi-sub" in combined_text
         is_lossless_or_remux = is_remux or any(w in combined_text for w in ["web-dl avc", "web-dl aac2.0 h.264", "web-dl h.264", "blu-ray", "bluray", "bdrip"])
 
@@ -534,13 +537,7 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
                             v_stem_w = os.path.splitext(v_name)[0]
                             try:
                                 # Clean up any 0-byte leftover or extensionless temporary files
-                                for tmp_f in os.listdir(out_d):
-                                    tf_path = os.path.join(out_d, tmp_f)
-                                    if os.path.isfile(tf_path) and os.path.getsize(tf_path) == 0 and not tmp_f.endswith((".mkv", ".mp4", ".srt")):
-                                        try:
-                                            os.remove(tf_path)
-                                        except Exception:
-                                            pass
+                                # Clean temp aria2 files only if aborted
 
                                 for f in os.listdir(out_d):
                                     if v_stem_w.lower() in f.lower() and f.lower().endswith((".mkv", ".mp4", ".avi")):
