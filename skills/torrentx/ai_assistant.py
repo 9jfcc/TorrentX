@@ -191,9 +191,29 @@ def translate_query_for_search(text):
 
     quality = "4K" if ("4k" in text.lower() or "2160" in text) else ("1080p" if "1080" in text else "Any")
     want_remux = bool(re.search(r'\b(remux|remxu|remx|ريمكس)\b', text, re.I))
-    want_crunchyroll = bool(re.search(r'(?:كرانشي\s*رول|كرانشيرول|crunchyroll|\bcr\b)', text, re.I))
+    want_crunchyroll = bool(re.search(r'(?:كرانشي(?:\s*رول)?|كرانشيرول|crunchyroll|\bcr\b)', text, re.I))
     want_uncompressed = bool(re.search(r'(?:بدون\s*ضغط|غير\s*مضغوط|raw|remux|اعلى\s*جودة|أعلى\s*جودة)', text, re.I))
     want_av1 = bool(re.search(r'\b(av1|av01)\b', text, re.I))
+    want_h264 = bool(re.search(r'\b(h264|x264|avc|h\.264)\b', text, re.I))
+    want_hevc = bool(re.search(r'\b(h265|x265|hevc|h\.265)\b', text, re.I))
+    want_bluray = bool(re.search(r'\b(bluray|blu-ray|bdrip|بلوراي)\b', text, re.I))
+    want_web = bool(re.search(r'\b(web-?dl|webrip|ويب)\b', text, re.I)) or want_crunchyroll
+
+    # Detect explicit release groups requested by user
+    explicit_groups = []
+    known_groups = {
+        'erai': ['erai', 'erai-raws', 'erairaws', 'ايراي', 'إيراي'],
+        'subsplease': ['subsplease', 'subs please'],
+        'judas': ['judas'],
+        'varyg': ['varyg'],
+        'kralimarko': ['kralimarko'],
+        'naisu': ['naisu'],
+        'yify': ['yify', 'yts'],
+        'qxr': ['qxr']
+    }
+    for grp_key, grp_aliases in known_groups.items():
+        if any(re.search(rf'\b{re.escape(a)}\b', text, re.I) or a in text for a in grp_aliases):
+            explicit_groups.append(grp_key)
 
     tech_words = [
         'second', '2nd', 'third', '3rd', 'fourth', '4th', 'fifth', '5th', 'first', '1st',
@@ -247,6 +267,11 @@ def translate_query_for_search(text):
         "want_crunchyroll": want_crunchyroll,
         "want_uncompressed": want_uncompressed,
         "want_av1": want_av1,
+        "want_h264": want_h264,
+        "want_hevc": want_hevc,
+        "want_bluray": want_bluray,
+        "want_web": want_web,
+        "explicit_groups": explicit_groups,
         "want_debrid": want_debrid,
         "want_upscale": want_upscale
     }
@@ -331,6 +356,9 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
 
         is_av1 = any(w in combined_text for w in ["av1", "av01", "libaom"])
         is_crunchyroll = any(w in combined_text for w in ["crunchyroll", "cr ", "cr]", "-cr-", "erai-raws", "subsplease", "tsundere-raws"])
+        is_h264_stream = any(w in combined_text for w in ["h264", "x264", "avc", "h.264"])
+        is_hevc_stream = any(w in combined_text for w in ["h265", "x265", "hevc", "h.265"])
+        matches_explicit_group = any(g in combined_text for g in info.get("explicit_groups", []))
         has_arabic_tag = "🇸🇦" in combined_text or bool(re.search(r"\b(arabic|ara|ar)\b", combined_text)) or "ar]" in combined_text
         has_multi_subs = "multi subs" in combined_text or "multisub" in combined_text or "multi-sub" in combined_text
         is_lossless_or_remux = is_remux or any(w in combined_text for w in ["web-dl avc", "web-dl aac2.0 h.264", "web-dl h.264", "blu-ray", "bluray", "bdrip"])
@@ -368,6 +396,9 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             "is_foreign_dub": is_foreign_dub,
             "is_av1": is_av1,
             "is_crunchyroll": is_crunchyroll,
+            "is_h264": is_h264_stream,
+            "is_hevc": is_hevc_stream,
+            "matches_explicit_group": matches_explicit_group,
             "has_arabic_tag": has_arabic_tag,
             "has_multi_subs": has_multi_subs,
             "is_lossless_or_remux": is_lossless_or_remux,
@@ -405,13 +436,36 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
             else:
                 score += 800
 
+        # Massive Priority for Explicit Release Groups requested by user
+        if info.get("explicit_groups"):
+            if c.get("matches_explicit_group"):
+                score += 6000
+            else:
+                score -= 1500
+
+        # Codec preferences (H.264 vs HEVC)
+        if info.get("want_h264"):
+            if c.get("is_h264"):
+                score += 3000
+            elif c.get("is_hevc"):
+                score -= 2000
+
+        if info.get("want_hevc"):
+            if c.get("is_hevc"):
+                score += 3000
+            elif c.get("is_h264"):
+                score -= 1000
+
         # Crunchyroll source boost
         if info.get("want_crunchyroll"):
             if c["is_crunchyroll"]:
-                score += 1500
+                score += 3500
+            # If user explicitly asked for Crunchyroll WEB-DL, heavily penalize Blu-ray Remux!
+            if c["is_remux"]:
+                score -= 4000
 
-        # Uncompressed / Remux preference
-        if info.get("want_uncompressed") or info.get("want_remux"):
+        # Uncompressed / Remux preference (only if user did not request Crunchyroll WEB-DL)
+        if (info.get("want_uncompressed") or info.get("want_remux")) and not info.get("want_crunchyroll"):
             if c["is_remux"]:
                 score += 1200
             elif c["is_lossless_or_remux"]:
@@ -461,6 +515,33 @@ def handle_smart_download_and_search(user_prompt, ui_debrid_mode="auto", allow_u
 
     valid_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
     best = valid_candidates[0] if valid_candidates else candidates[0]
+
+    # Check if user requested an explicit release group or codec and if it is not cached
+    user_has_explicit_spec = bool(info.get("explicit_groups") or (info.get("want_crunchyroll") and info.get("want_h264")))
+    if user_has_explicit_spec and use_debrid:
+        # Check if best matching candidate for this explicit spec is cached in Real-Debrid
+        if not best.get("is_rd_cached"):
+            cached_alts = [c for c in candidates if c.get("is_rd_cached") and not c.get("is_foreign_dub")]
+            if cached_alts:
+                best_cached = cached_alts[0]
+                alt_type = "بلوراي (Blu-ray / Remux)" if best_cached.get("is_remux") else "نسخة أخرى"
+                spec_label = " ".join([g.upper() for g in info.get("explicit_groups", [])])
+                if info.get("want_crunchyroll"):
+                    spec_label += " Crunchyroll"
+                if info.get("want_h264"):
+                    spec_label += " H.264"
+                
+                notice_msg = (
+                    f"⚠️ **تنبيه:** النسخة المطلوبة تحديداً (`{spec_label.strip()}`) متوفرة كتورنت ولكنها **غير مخزنة سحابياً (Not Cached) في Real-Debrid حالياً**.\n\n"
+                    f"• **النسخة التي طلبتها (تورنت عادي P2P عبر qBittorrent):**\n"
+                    f"  \u202A{best['title']}\u202C ({best['size']})\n\n"
+                    f"• **النسخة البديلة المتوفرة كاش سحابي فوري (Aria2):**\n"
+                    f"  \u202A{best_cached['title']}\u202C ({best_cached['size']}) - {alt_type}\n\n"
+                    f"💡 **خياراتك للتحميل:**\n"
+                    f"1. إذا أردت تنزيل نسختك المطلوبة تورنت عادي، اطلب: `حملها عبر qbittorrent`.\n"
+                    f"2. إذا أردت تنزيل النسخة السحابية المتوفرة فوراً بأقصى سرعة، اطلب: `حمل النسخة الكاش`."
+                )
+                return True, notice_msg
 
     # Subtitle search & download
     sub_status = "جاري التحقق..."
