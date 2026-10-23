@@ -38,28 +38,84 @@ QBITTORRENT_PATH = r"C:\Program Files\qBittorrent\qbittorrent.exe"
 # GENERAL STREAM & TORRENT RESOLVER (DIRECT REAL-DEBRID + QBITTORRENT)
 # ==============================================================================
 
+PHONETIC_ANIME_MAP = {
+    'فيت': 'Fate',
+    'سترينج': 'strange',
+    'فيك': 'Fake',
+    'هجوم العمالقة': 'Attack on Titan',
+    'صراع العروش': 'Game of Thrones',
+    'بريكنج باد': 'Breaking Bad',
+    'ون بيس': 'One Piece',
+    'ديث نوت': 'Death Note',
+    'سولو ليفلينج': 'Solo Leveling',
+    'كيميتسو': 'Demon Slayer',
+    'قاتل الشياطين': 'Demon Slayer',
+    'تشينسو مان': 'Chainsaw Man',
+    'جوجوتسو': 'Jujutsu Kaisen',
+    'دكتور ستون': 'Dr. Stone',
+    'فريرن': 'Frieren',
+    'داندا دان': 'Dandadan',
+    'بلو لوك': 'Blue Lock',
+    'بليتش': 'Bleach',
+    'ناروتو': 'Naruto',
+    'دراغون بول': 'Dragon Ball',
+    'بريزون بريك': 'Prison Break',
+    'فايكنج': 'Vikings',
+    'بيكي بلايندرز': 'Peaky Blinders',
+    'ذا بويز': 'The Boys'
+}
+
 def get_imdb_id(title, is_series=True):
-    """Fetches IMDb ID from Cinemeta catalog for any title dynamically."""
-    clean = urllib.parse.quote(title.strip())
-    media_type = "series" if is_series else "movie"
-    url = f"https://v3-cinemeta.strem.io/catalog/{media_type}/top/search={clean}.json"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    """Fetches IMDb ID using TMDB API dynamically with Arabic phonetic resolution."""
+    query = title.strip()
+    for ar, en in PHONETIC_ANIME_MAP.items():
+        if ar in query:
+            query = query.replace(ar, en)
+
+    tmdb_key = "8476a7ab80ad76f0936744df0430e67c"
+    preferred_type = "tv" if is_series else "movie"
+    fallback_result = None
+
+    import requests
+    for lang in ["en-US", "ar"]:
+        clean_q = urllib.parse.quote(query)
+        url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_key}&query={clean_q}&include_adult=false&language={lang}"
+        try:
+            r = requests.get(url, timeout=6).json()
+            results = r.get("results", [])
+            for res in results:
+                mtype = res.get("media_type")
+                if mtype not in ["movie", "tv"]:
+                    continue
+                item_id = res["id"]
+                name = res.get("name") or res.get("title") or res.get("original_name") or res.get("original_title")
+                ext_url = f"https://api.themoviedb.org/3/{mtype}/{item_id}/external_ids?api_key={tmdb_key}"
+                ext = requests.get(ext_url, timeout=5).json()
+                imdb_id = ext.get("imdb_id")
+                if imdb_id:
+                    if mtype == preferred_type:
+                        return imdb_id, name
+                    elif not fallback_result:
+                        fallback_result = (imdb_id, name)
+        except Exception:
+            pass
+
+    if fallback_result:
+        return fallback_result
+
+    # Fallback to IMDb suggestion API if TMDB search yields no results
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            metas = data.get("metas", [])
-            if metas:
-                for m in metas:
-                    m_type = m.get("type", "").lower()
-                    m_id = m.get("imdb_id") or m.get("id")
-                    if is_series and m_type == "series":
-                        return m_id, m.get("name")
-                    elif not is_series and m_type == "movie":
-                        return m_id, m.get("name")
-                fallback_id = metas[0].get("imdb_id") or metas[0].get("id")
-                return fallback_id, metas[0].get("name")
+        clean_imdb = query.lower().replace(" ", "_")
+        url_imdb = f"https://v3.sg.media-imdb.com/suggestion/x/{clean_imdb}.json"
+        r_imdb = requests.get(url_imdb, headers={"User-Agent": "Mozilla/5.0"}, timeout=5).json()
+        for item in r_imdb.get("d", []):
+            iid = item.get("id")
+            iname = item.get("l")
+            if iid and iname:
+                return iid, iname
     except Exception:
         pass
+
     return None, title
 
 def get_torrentio_streams(imdb_id, season=1, episode=1, is_series=True, rd_api_key=None):
@@ -142,7 +198,7 @@ def translate_query_for_search(text):
         'second', '2nd', 'third', '3rd', 'fourth', '4th', 'fifth', '5th', 'first', '1st',
         'remux', 'remxu', 'remx', 'webdl', 'webrip', 'web', 'hdr', 'pilot', 'repack', 'atmos', 'dvd', 'hdtv',
         'uhd', 'flac', 'dsnp', 'amzn', 'nf', 'hmax', '4k', '1080p', '2160p', 'episode', 'season', 'series',
-        'upscale', 'topaz', 'ai', 'crunchyroll', 'cr', 'av1', 'avc', 'hevc'
+        'upscale', 'topaz', 'ai', 'crunchyroll', 'cr', 'av1', 'avc', 'hevc', 'h264', 'x264', 'h265', 'x265', '1080', '720'
     ]
     arabic_stopwords = [
         "حمل", "لي", "الحلقة", "حلقة", "الاولى", "الأولى", "الثانية", "الثالثة", "الرابعة", "الخامسة",
@@ -156,7 +212,7 @@ def translate_query_for_search(text):
 
     # Priority 1: Match title right after 'انمي' or 'مسلسل' or 'فلم' or 'فيلم'
     title = None
-    m_prefix = re.search(r'(?:انمي|أنمي|مسلسل|فلم|فيلم)\s+([a-zA-Z0-9_\-\.\:\'\"]+(?:\s+[a-zA-Z0-9_\-\.\:\'\"]+)*)', text)
+    m_prefix = re.search(r'(?:انمي|أنمي|مسلسل|فلم|فيلم)\s+([^\,\;\.\n\r]+)', text)
     if m_prefix:
         raw_cand = m_prefix.group(1).split()
         cand_tokens = []
