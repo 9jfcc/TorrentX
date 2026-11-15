@@ -29,6 +29,36 @@ SERVICES_META = {
         "name": "TorBox",
         "api_url": "https://torbox.app/settings?section=account",
         "login_url": "https://torbox.app/"
+    },
+    "realdebrid": {
+        "name": "Real-Debrid",
+        "api_url": "https://real-debrid.com/apitoken",
+        "login_url": "https://real-debrid.com/"
+    },
+    "alldebrid": {
+        "name": "AllDebrid",
+        "api_url": "https://alldebrid.com/apikeys",
+        "login_url": "https://alldebrid.com/"
+    },
+    "premiumize": {
+        "name": "Premiumize",
+        "api_url": "https://www.premiumize.me/account",
+        "login_url": "https://www.premiumize.me/"
+    },
+    "debridlink": {
+        "name": "Debrid-Link",
+        "api_url": "https://debrid-link.com/webapp/apikey",
+        "login_url": "https://debrid-link.com/"
+    },
+    "offcloud": {
+        "name": "Offcloud",
+        "api_url": "https://offcloud.com/account",
+        "login_url": "https://offcloud.com/"
+    },
+    "putio": {
+        "name": "Put.io",
+        "api_url": "https://app.put.io/settings/account",
+        "login_url": "https://put.io/"
     }
 }
 
@@ -66,19 +96,46 @@ def save_config(cfg):
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
-def get_torbox_api_key():
+def get_active_service(cfg=None):
+    """Returns (service_id, api_key) for the user's chosen debrid service, or ('p2p', '')."""
+    cfg = cfg or load_config()
+    preferred = (cfg.get("default_service") or "torbox").lower().strip()
+    if preferred in ("none", "p2p", "qbittorrent"):
+        return "p2p", ""
+    services = cfg.get("services", {})
+    key = (services.get(preferred, {}).get("api_key") or "").strip()
+    if key:
+        return preferred, key
+    # Fallback to any other configured debrid service with an API key
+    for svc_id, meta in services.items():
+        k = (meta.get("api_key") or "").strip()
+        if k:
+            return svc_id, k
+    return "p2p", ""
+
+
+def get_service_api_key(service_id="torbox"):
     cfg = load_config()
-    return cfg.get("services", {}).get("torbox", {}).get("api_key") or ""
+    return (cfg.get("services", {}).get(service_id, {}).get("api_key") or "").strip()
 
 
-def torbox_api_request(endpoint, data=None, method="GET"):
-    key = get_torbox_api_key()
-    url = f"https://api.torbox.app/v1/api/{endpoint}"
-    headers = {"Authorization": f"Bearer {key}", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    encoded_data = urllib.parse.urlencode(data).encode("utf-8") if data is not None else None
-    req = urllib.request.Request(url, data=encoded_data, headers=headers, method=method)
+def get_torbox_api_key():
+    return get_service_api_key("torbox")
+
+
+def _http_json(url, data=None, headers=None, method="GET", json_body=None, timeout=20):
+    hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    if headers:
+        hdrs.update(headers)
+    body = None
+    if json_body is not None:
+        body = json.dumps(json_body).encode("utf-8")
+        hdrs.setdefault("Content-Type", "application/json")
+    elif data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             content = resp.read().decode("utf-8")
             return json.loads(content) if content else {}
     except urllib.error.HTTPError as e:
@@ -86,6 +143,16 @@ def torbox_api_request(endpoint, data=None, method="GET"):
         return {"error": True, "code": e.code, "message": err_msg}
     except Exception as e:
         return {"error": True, "message": str(e)}
+
+
+def torbox_api_request(endpoint, data=None, method="GET"):
+    key = get_torbox_api_key()
+    return _http_json(
+        f"https://api.torbox.app/v1/api/{endpoint}",
+        data=data,
+        headers={"Authorization": f"Bearer {key}"},
+        method=method,
+    )
 
 
 def probe_streams(media_url, timeout=15):
@@ -347,11 +414,10 @@ def resolve_movie_identity(title_or_imdb, year=None):
 
 def fetch_torrentio_movie_streams(imdb_id):
     """
-    Fetches Torrentio streams using TorBox instant cloud caching ([TB+]) in <1 second.
+    Fetches Torrentio streams using the user's configured debrid service (or P2P fallback) in <1 second.
     """
-    tb_key = get_torbox_api_key()
-    prefix = f"torbox={tb_key}/" if tb_key else ""
-    svc_name = "torbox" if tb_key else "p2p"
+    svc_id, api_key = get_active_service()
+    prefix = f"{svc_id}={api_key}/" if (svc_id != "p2p" and api_key) else ""
 
     url = f"https://torrentio.strem.fun/{prefix}stream/movie/{imdb_id}.json"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -360,7 +426,7 @@ def fetch_torrentio_movie_streams(imdb_id):
             data = json.loads(resp.read().decode("utf-8"))
             streams = data.get("streams", [])
             for s in streams:
-                s["_debrid_service"] = svc_name
+                s["_debrid_service"] = svc_id
             return streams
     except Exception:
         return []
@@ -734,7 +800,62 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
 
 
 def add_magnet_and_resolve(magnet_uri, target_season=None, target_episode=None):
-    """Adds a magnet to TorBox and resolves direct download links."""
+    """Adds a magnet to the active debrid service and resolves direct download links."""
+    svc_id, key = get_active_service()
+    media_exts = ('.mkv', '.mp4', '.avi', '.ts', '.m2ts')
+
+    if svc_id == "realdebrid":
+        hdrs = {"Authorization": f"Bearer {key}"}
+        add = _http_json("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", data={"magnet": magnet_uri}, headers=hdrs, method="POST")
+        if add.get("error") or not add.get("id"):
+            return add
+        tid = add["id"]
+        _http_json(f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{tid}", data={"files": "all"}, headers=hdrs, method="POST")
+        info = _http_json(f"https://api.real-debrid.com/rest/1.0/torrents/info/{tid}", headers=hdrs)
+        links = []
+        for link in info.get("links") or []:
+            unr = _http_json("https://api.real-debrid.com/rest/1.0/unrestrict/link", data={"link": link}, headers=hdrs, method="POST")
+            if unr.get("download"):
+                links.append({"filename": unr.get("filename"), "filesize": unr.get("filesize"), "download_url": unr["download"]})
+        return {"service": "realdebrid", "torrent_id": tid, "filename": info.get("filename"), "status": info.get("status"), "is_cached": len(links) > 0, "unrestricted_links": links}
+
+    if svc_id == "alldebrid":
+        up = _http_json(f"https://api.alldebrid.com/v4/magnet/upload?agent=TorrentX&apikey={urllib.parse.quote(key)}", data={"magnets[]": magnet_uri}, method="POST")
+        mags = (up.get("data") or {}).get("magnets") or []
+        if not mags:
+            return up
+        mid = mags[0].get("id")
+        st = _http_json(f"https://api.alldebrid.com/v4/magnet/status?agent=TorrentX&apikey={urllib.parse.quote(key)}&id={mid}")
+        mag_data = (st.get("data") or {}).get("magnets") or {}
+        links = []
+        for linfo in mag_data.get("links") or []:
+            unr = _http_json(f"https://api.alldebrid.com/v4/link/unlock?agent=TorrentX&apikey={urllib.parse.quote(key)}&link={urllib.parse.quote(linfo.get('link', ''))}")
+            d = unr.get("data") or {}
+            if d.get("link"):
+                links.append({"filename": d.get("filename"), "filesize": d.get("filesize"), "download_url": d["link"]})
+        return {"service": "alldebrid", "torrent_id": mid, "filename": mag_data.get("filename"), "status": mag_data.get("status"), "is_cached": len(links) > 0, "unrestricted_links": links}
+
+    if svc_id == "premiumize":
+        res = _http_json("https://www.premiumize.me/api/transfer/directdl", data={"apikey": key, "src": magnet_uri}, method="POST")
+        content = res.get("content") or []
+        media_files = [c for c in content if str(c.get("path", "")).lower().endswith(media_exts)]
+        target = max(media_files, key=lambda x: x.get("size", 0)) if media_files else (content[0] if content else None)
+        links = [{"filename": os.path.basename(target.get("path", "")), "filesize": target.get("size"), "download_url": target.get("link")}] if target and target.get("link") else []
+        return {"service": "premiumize", "is_cached": len(links) > 0, "unrestricted_links": links}
+
+    if svc_id == "debridlink":
+        hdrs = {"Authorization": f"Bearer {key}"}
+        res = _http_json("https://debrid-link.com/api/v2/seedbox/add", json_body={"url": magnet_uri, "async": True}, headers=hdrs, method="POST")
+        val = res.get("value") or {}
+        files = val.get("files") or []
+        media_files = [f for f in files if str(f.get("name", "")).lower().endswith(media_exts)]
+        target = max(media_files, key=lambda x: x.get("size", 0)) if media_files else (files[0] if files else None)
+        links = [{"filename": target.get("name"), "filesize": target.get("size"), "download_url": target.get("downloadUrl")}] if target and target.get("downloadUrl") else []
+        return {"service": "debridlink", "torrent_id": val.get("id"), "filename": val.get("name"), "is_cached": len(links) > 0, "unrestricted_links": links}
+
+    if svc_id != "torbox":
+        return {"error": True, "message": f"Debrid service '{svc_id}' not configured with an API key; use qBittorrent/P2P."}
+
     res = torbox_api_request("torrents/createtorrent", data={"magnet": magnet_uri}, method="POST")
     if res.get("error") or not res.get("success"):
         return res
@@ -752,10 +873,8 @@ def add_magnet_and_resolve(magnet_uri, target_season=None, target_episode=None):
     unrestricted_links = []
 
     if is_cached and files:
-        media_exts = ('.mkv', '.mp4', '.avi', '.ts', '.m2ts')
         media_files = [f for f in files if str(f.get("name", "")).lower().endswith(media_exts)]
         target_file = max(media_files, key=lambda x: x.get("size", 0)) if media_files else files[0]
-        key = get_torbox_api_key()
         dl_res = torbox_api_request(f"torrents/requestdl?token={key}&torrent_id={torrent_id}&file_id={target_file.get('id')}&zip=false")
         if dl_res.get("data"):
             unrestricted_links.append({
@@ -765,6 +884,7 @@ def add_magnet_and_resolve(magnet_uri, target_season=None, target_episode=None):
             })
 
     return {
+        "service": "torbox",
         "torrent_id": torrent_id,
         "filename": t_info.get("name"),
         "bytes": t_info.get("size"),
