@@ -29,12 +29,18 @@ When searching for games, restrict sources exclusively to these verified groups 
 
 ## 3. Blacklisted & Dangerous Sources (STRICTLY FORBIDDEN)
 
-Never recommend or download games from:
-- ❌ **The Pirate Bay (`thepiratebay`)**: Full of malware, trojans, and malicious game executables.
-- ❌ **1337x (for games)**: Blacklisted by r/PiratedGames for distributing tainted game releases and miners.
-- ❌ **IGG-Games / PCGamesTorrents**: Known for injected DRM, custom adware, and malicious redirects.
-- ❌ **SteamUnlocked**: Distributes slow, untrusted, and stolen uploads.
-- ❌ **Ocean of Games / AimHaven / Apkafe**: Malicious payloads and modified installers.
+Never recommend, search, or download games from:
+- ❌ **The Pirate Bay (`thepiratebay`) & Kickass Torrents**: Unmoderated, full of malware, trojans, and malicious executables.
+- ❌ **1337x (for games)**: Blacklisted by r/PiratedGames for distributing tainted game releases and crypto-miners.
+- ❌ **IGG-Games / PCGamesTorrents / LoadGames / GamesTorrents**: Known for injected DRM, custom adware, doxxing, and malicious redirects.
+- ❌ **SteamUnlocked**: Distributes slow, untrusted, and stolen uploads (often bundled with adware redirects).
+- ❌ **Ocean of Games / AimHaven / Apkafe / CrackingPatching / CracksHash / Cracked-Games.org**: Malicious payloads, crypto-miners, and modified installers.
+- ❌ **Untrusted Repackers**: **BBRepacks**, **Seyter**, **Qoob**, **nosTEAM** (flagged for crypto-miners, adware, and malware).
+- ❌ **Fake Scene-Group Websites**: Scene groups (e.g., CODEX, RUNE, EMPRESS, SKIDROW, HOODLUM, FLT, TENOKE) **do not have websites**. Any site claiming to be their official site (e.g., `skidrowreloaded`, `skidrowcodex`, `codex-games`, `hoodlum-games`) is fake and unsafe.
+
+### Safe Verification Rules (from `rentry.org/pgames` & `r/Piracy/wiki/megathread`)
+- Always verify hashes, file lists, or user comments via **CS.RIN.RU** or official repacker domains when unsure.
+- Browser safety reminder: always use **uBlock Origin** on DDL/filehoster sites to block fake download buttons and malicious popups.
 
 ---
 

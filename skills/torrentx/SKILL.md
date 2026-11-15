@@ -1,85 +1,92 @@
 ---
 name: torrentx
-description: Find, stream, and download movies, series, anime, and episodes with instant Real-Debrid cloud caching, high-speed Aria2 downloads, Arabic subtitles, alass audio synchronization, and deep MCP media inspection. Cross-platform support for Windows, macOS, and Linux.
+description: High-speed, intelligent movie and media download suite with TorBox/Real-Debrid instant cloud caching, 4-Tier Remux/WEB-DL quality selection (strictly no upscales), Movie-First execution pipeline, embedded Arabic subtitle inspection, exclusive SubSource & SubDL multi-subtitle fetching (all official platforms + top translators with content-level deduplication, zero OpenSubtitles), and automatic alass timing synchronization + MKV muxing.
 ---
 
-# 🎬 TorrentX Autonomous Entertainment Skill (Cross-Platform)
+# 🎬 TorrentX High-Speed & Smart Movie Protocol
 
-TorrentX provides a comprehensive, dual-tier entertainment and torrent automation architecture designed for high speed, reliability, and precision on **Windows**, **macOS**, and **Linux**.
+Whenever the user asks to download a movie (e.g., `حمل لي فلم ...`, `نزل فلم ...`), execute the **Fast Movie-First Protocol** immediately using `debrid_manager.py` and `subtitle_manager.py`.
 
 ---
 
-## ⚡ Tier 1: Fast Autonomous Assistant Pipeline
+## ⚡ 1. Speed & Execution Order (الأولوية للسرعة: تحميل الفلم أولاً ثم الترجمات)
 
-For user requests in natural language to **download**, **stream without downloading**, **search only**, or **play** any movie, series, episode, or anime:
+To save maximum time, **ALWAYS start the movie download FIRST**, and then inspect/fetch subtitles while the movie is already downloading in the background:
 
-Execute the master assistant CLI based on the user's OS:
+### Single-Command Fast Pipeline (Recommended):
+```powershell
+python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" fast-movie "<Movie Title or IMDb ID>" "[Optional Output Dir]" "[Optional Year]"
+```
 
-- **Windows (PowerShell):**
+What `fast-movie` does automatically in **~2–4 seconds**:
+1. **Instant Movie Identification & TorBox Cache Lookup (~1.0s):**
+   - Resolves the exact `imdb_id`, title, and release year via TMDB/IMDb.
+   - Queries **TorBox** (`[TB+]`) cached streams directly for instant cloud speeds.
+2. **Starts Movie Download FIRST (~1.8s):**
+   - Selects the #1 best release using the **4-Tier Quality & Anti-Upscale Engine** and immediately dispatches the 16-connection **Aria2** download before touching subtitles.
+3. **Embedded Arabic Subtitle Inspection:**
+   - Probes the cloud stream header via `ffprobe` (`check_embedded_arabic_sub`) while Aria2 downloads.
+   - If the movie **already contains an embedded Arabic subtitle track** (`ar` / `ara` / `arabic`), it reports the track and skips unnecessary external subtitle downloads.
+4. **Smart Subtitle Fetching (Strictly `SubSource` & `SubDL` ONLY — NEVER OpenSubtitles):**
+   - If no embedded Arabic subtitle exists, queries **only `SubSource` and `SubDL` APIs in parallel**.
+   - **Priority 1 (All Official Platforms):** Downloads **ALL distinct official platform subtitles** available (`Netflix`, `OSN+`, `iTunes / Apple TV+`, `Amazon Prime`, `Disney+`, `Max`, `Shahid`, `BluRay-Retail`).
+   - **Priority 2 (Translators / Teams):** Downloads top distinct individual translator or translation team subtitles.
+   - **Zero-Duplicate Content Fingerprinting:** Compares the actual normalized Arabic dialogue lines of every downloaded `.srt` file so the same translation is **never** saved twice (even if uploaded under different names across SubSource and SubDL).
+   - **Zero OpenSubtitles Tolerance:** Rejects any OpenSubtitles/machine-translated entries and strips any promotional watermarks.
+   - **Dedicated Subtitles Folder:** All external `.srt` subtitles are saved cleanly inside **`~/Downloads/Movies/Subtitles`** (or your configured `subtitles_dir`).
+5. **Automatic `alass` Timing Sync & MKVMerge Muxing:**
+   - Spawns `subtitle_manager.py watch-and-sync` in the background.
+   - As soon as the movie finishes downloading, it extracts the ground-truth embedded reference subtitle (`.ref_eng.srt` from text tracks OR converts Blu-ray PGS `.sup` timestamps to `.ref_eng.srt` in 0.05s!), checks the timing of every downloaded Arabic subtitle, runs **`alass`** to fix any timing offset/drift, applies UTF-8 BOM + Arabic RTL punctuation fixes (`fix_arabic_rtl_file`), and muxes all tracks into the MKV container via `mkvmerge`.
+
+---
+
+## 👑 2. Strict 4-Tier Movie Quality Ladder (بروتوكول جودة الأفلام الصارم)
+
+1. **Strict Anti-Upscale Rule (منع الأبسكيل نهائياً):**
+   - Any release tagged with `upscale`, `ai`, `topaz`, `visionx`, `4320p`, `8k` is strictly rejected.
+   - **Unlabelled 4K Upscale Protection:** If a movie has `1080p BluRay Remux` releases, zero `4K BluRay Remux` releases, and zero legitimate `4K WEB-DL` releases from known streaming platforms, any lone 2160p encode is automatically rejected as a fake upscale in favor of the `1080p BluRay Remux`.
+2. **Tier 1 — `4K UHD BluRay Remux`:**
+   - First choice whenever the movie has a true 4K UHD Blu-ray disc (`2160p Remux`, untouched video, lossless `TrueHD Atmos` / `DTS-HD MA` audio, `DV` / `HDR`).
+3. **Tier 2 — `1080p BluRay Remux`:**
+   - If the movie does not have a true 4K release, choose the untouched **`1080p BluRay Remux`** (`AVC`/`VC-1` untouched disc, lossless `DTS-HD MA` / `TrueHD` audio).
+4. **Tier 3 — `4K WEB-DL (Untouched / High-Bitrate)`:**
+   - If the movie has no Blu-ray disc at all (e.g. streaming exclusive or pre-disc digital release), choose the highest-bitrate untouched **`4K WEB-DL`** (`ATVP`, `AMZN`, `NF`, `MA`, `DSNP`, `MAX`, `DV`/`HDR`, `Atmos`/`DDP5.1`), avoiding compressed `WEBRip`, `AV1`, `YTS`, or `PSA` encodes.
+5. **Tier 4 — `1080p WEB-DL (Untouched / High-Bitrate)`:**
+   - Used only if the movie has neither a Blu-ray Remux nor a 4K WEB-DL.
+
+---
+
+## 🛠️ 3. Direct CLI Commands Reference
+
+- **Fast Movie Download (Movie First -> Embedded Check -> SubSource/SubDL -> Auto alass Sync):**
   ```powershell
-  python "$env:USERPROFILE\.gemini\config\skills\torrentx\ai_assistant.py" '<user prompt exactly>'
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" fast-movie "<Title or IMDb ID>" "[Output Dir]" "[Year]"
   ```
-
-- **macOS / Linux (Zsh / Bash):**
-  ```bash
-  python3 "$HOME/.gemini/config/skills/torrentx/ai_assistant.py" '<user prompt exactly>'
+- **Search & Rank Movie Releases Only (No Download):**
+  ```powershell
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" search-movie "<Title or IMDb ID>" "[Year]"
   ```
-
-### 🌟 Key Capabilities of the Master Assistant:
-1. **Natural Language Understanding & Arabic Ordinals:** Extracts franchise titles (e.g., `Fate/stay night`, `Fate/strange Fake`), season numbers, and Arabic ordinal numbers (`الأولى` to `العاشرة` to `العشرون`) with 100% precision.
-2. **Search-Only & Intent Guarding:** Phrases like `ابحث فقط`, `بدون تحميل`, or `لا تحمل` automatically invoke Search-Only mode, returning a structured Markdown table of top available releases with cache status, without initiating downloads.
-3. **Strict Preference & Quality Matching:**
-   - When the user asks for `Remux` or `4K`, matching candidates are enforced as hard acceptance criteria.
-   - If the exact requested release is not cached in Real-Debrid, the user is transparently notified and offered the choice between P2P qBittorrent download for their exact version vs. instant cached alternatives.
-4. **Instant Cloud Streaming vs. 16-Connection Downloads:**
-   - **Stream (`شغل`, `بث`, `stream`):** Unrestricts the Real-Debrid link and launches **IINA** (on macOS) or **MPC-HC** (on Windows) immediately with auto-loaded Arabic subtitles.
-   - **Download (`حمل`, `نزله`, `تحميل`):** Dispatches high-speed 16-connection **Aria2** download directly into `Downloads`.
-5. **Arabic Subtitles & Waveform Sync:** Fetches matching Arabic subtitles, names them identically to the video file, and runs detached background audio synchronization (`alass` / `ffsubsync`).
+- **Smart Fetch Subtitles Only (SubSource + SubDL, All Platforms + Translators, Deduplicated):**
+  ```powershell
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" smart-fetch "<Title>" "<IMDb ID>" "<Output Dir>" "<Video Filename>" "[bluray|web]"
+  ```
+- **Check if Video/Stream Has Embedded Arabic Subtitle:**
+  ```powershell
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" check-embedded "<Video Path or Direct HTTP URL>"
+  ```
+- **Synchronize Subtitle Timing with `alass` Immediately:**
+  ```powershell
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" sync "<Video Path>" "<Subtitle Path>"
+  ```
+- **Sync All Subtitles & Mux into MKV Container:**
+  ```powershell
+  python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" sync-all "<Video Path>" "<Sub1.srt|Sub2.srt|...>"
+  ```
 
 ---
 
-## 🔬 Tier 2: Deep MCP Inspection & Verification Tools
+## 🔬 4. Deep MCP Inspection Tools (When Needed)
 
-Whenever deep inspection, bitrate analysis, track verification, or P2P torrent exploration is required, agents can invoke the native TorrentX MCP tools:
-
-- `mcp_torrentx_inspect_media`: Inspect local or remote media streams, extracting true video codecs, bitrates, audio channel layouts, and embedded subtitle tracks.
-- `mcp_torrentx_inspect_torrent`: Probe torrent metadata, file lists, piece distributions, and swarm health before downloading.
-- `mcp_torrentx_find` / `mcp_torrentx_search`: Query decentralized DHT and torrent trackers directly for rare or unindexed releases.
-
----
-
-## 🛠️ Management & Bot Administration
-
-### 1. Secure Remote Bots (Telegram & Discord)
-TorrentX includes zero-idle-cost Telegram and Discord bots with PIN pairing:
-- Run all bots in the background:
-  - Windows:
-    ```powershell
-    python "$env:USERPROFILE\.gemini\config\skills\torrentx\run_all_bots.py" --silent
-    ```
-  - macOS / Linux:
-    ```bash
-    python3 "$HOME/.gemini/config/skills/torrentx/run_all_bots.py" --silent &
-    ```
-- **Security:** Each bot generates a 6-digit pairing PIN on first startup. Users authenticate via `/pair <PIN>` or `!pair <PIN>` to gain control over their personal PC.
-
-### 2. Configuration & Player Setup Wizard
-- Launch the Setup Wizard:
-  - Windows: `python "$env:USERPROFILE\.gemini\config\skills\torrentx\setup_wizard.py"`
-  - macOS: `python3 "$HOME/.gemini/config/skills/torrentx/setup_wizard.py"`
-
-### 3. Weekly Episode Tracking (Series Monitor)
-- Track a new series:
-  ```bash
-  python3 "$HOME/.gemini/config/skills/torrentx/series_monitor.py" add "<title>" <season> <last_ep>
-  ```
-- Check tracked series:
-  ```bash
-  python3 "$HOME/.gemini/config/skills/torrentx/series_monitor.py" check
-  ```
-
-### 4. Audio Subtitle Synchronization (alass)
-- Manually align subtitle to video:
-  ```bash
-  python3 "$HOME/.gemini/config/skills/torrentx/subtitle_manager.py" sync "<video_path>" "<subtitle_path>"
-  ```
+For rare P2P torrents not indexed on Torrentio or when deep bitstream verification is requested:
+- `mcp_torrentx_search`: Fast release-name search across torrent trackers.
+- `mcp_torrentx_find` / `mcp_torrentx_inspect_media` / `mcp_torrentx_inspect_torrent`: Deep P2P stream inspection.

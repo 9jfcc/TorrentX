@@ -1,103 +1,69 @@
 # TorrentX ⚡🎬
-### المحرك الذكي للبحث، البث المباشر، والتحميل السحابي فائق السرعة
-**The Ultimate AI-Powered Media Engine & Antigravity Skill for Movies, Series, and Anime.**
 
----
-
-[![GitHub Release](https://img.shields.io/github/v/release/9jfcc/TorrentX?style=for-the-badge&color=blue)](https://github.com/9jfcc/TorrentX/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-brightgreen?style=for-the-badge)]()
-
----
-
-## 🚀 التثبيت بأمر واحد (One-Line Quick Install)
-
-### الطريقة الأولى: عبر PowerShell (الأسهل والأسرع - لا يتطلب أي برامج إضافية)
-انسخ هذا السطر والصقه في نافذة **PowerShell** واضغط Enter:
-```powershell
-irm https://raw.githubusercontent.com/9jfcc/TorrentX/main/install.ps1 | iex
-```
-> سيقوم تلقائياً بتنزيل المهارة، وتثبيت Aria2 إذا لم تكن موجودة، وفتح معالج الإعداد التفاعلي لربط حساب Real-Debrid مباشرة!
-
----
-
-### الطريقة الثانية: عبر Node.js / NPX
-لمحبي استخدام Node.js مثل أدوات الـ MCP:
-```powershell
-npx github:9jfcc/TorrentX
-```
+**المحرك الذكي للبحث والتحميل السحابي فائق السرعة للأفلام، المسلسلات، الأنمي، والألعاب**  
+*The AI-Powered Media & Game Skill + MCP Server for Antigravity, Claude Code, and Codex.*
 
 ---
 
 ## 🌟 المميزات الرئيسية (Core Features)
 
-1. **مساعد ذكي فائق السرعة (AI Media Assistant):**
-   - معالجة الأوامر باللغة الطبيعية (العربية والإنجليزية) خلال 5 إلى 15 ثانية فقط.
-   - تحديد اسم العمل، الموسم، الحلقة، دقة العرض (4K, 1080p)، وفحص هل الإصدار خام أصلي (Remux / WEB-DL) بدون ضغط.
-   - استبعاد إصدارات الدبلجة الأجنبية (الفرنسية، الروسية، الهندية، إلخ) وتفضيل الصوت الإنجليزي الأصلي.
-
-2. **التكامل السحابي مع Real-Debrid & Aria2:**
-   - فحص الكاش السحابي الفوري عبر Torrentio وReal-Debrid API.
-   - تنزيل فائق السرعة عبر **Aria2** بـ 16 اتصالاً متزامناً مع فك توجيه الروابط وتخطي قيود Cloudflare وحماية العمليات الخلفية عبر WMI على ويندوز.
-   - دعم التنزيل المجاني عبر **qBittorrent** للمستخدمين بدون اشتراكات ديبرد.
-
-3. **البث المباشر الفوري (Instant Cloud Streaming):**
-   - تشغيل الروابط السحابية فوراً دون انتظار اكتمال التنزيل داخل مشغلات الفيديو المفضلة (**MPC-HC**, **MPV**, **PotPlayer**, **VLC**) مع تمرير الترجمة العربية تلقائياً.
-
-4. **إدارة الترجمة والمزامنة الذكية (Subtitles & Auto-Sync):**
-   - بحث تلقائي عن أحدث الترجمات العربية المتطابقة من مصادر متعددة وتسميتها بنفس اسم ملف الفيديو.
-   - مراقبة تلقائية للملفات المحملة لمزامنة الترجمات الصوتية باستخدام أدوات المزامنة التلقائية.
-
-5. **بوتات تيليجرام وديسكورد (Bots Integration):**
-   - تشغيل بوت **Telegram** وبوت **Discord** للتحكم بالبحث والتحميل من هاتفك أو سيرفرك الشخصي عن بعد.
-
-6. **مراقب الحلقات الجديدة (Series Monitor):**
-   - تتبع مواسم وحلقات مسلسلاتك المفضلة وتنزيل الحلقات الجديدة فور صدورها سحابياً.
-
-7. **بروتوكول MCP (Model Context Protocol):**
-   - متوافق مع وكلاء الذكاء الاصطناعي (Antigravity, Claude, Cursor, Windsurf) كـ MCP Server متكامل.
+- **⚡ التكامل السحابي مع TorBox & Aria2:**
+  - فحص الكاش السحابي الفوري عبر **TorBox API** وتنزيل مباشر بأقصى سرعة عبر `aria2c`.
+  - حماية ذكية من أخطاء `HTTP 429` على سيرفرات TorBox CDN وفك توجيه الروابط تلقائياً.
+  - **أمان صارم ضد الملفات الخبيثة:** حظر تلقائي لملفات `.exe` والسكربتات والأرشيفات المشبوهة عند تحميل الأفلام والمسلسلات.
+- **🎬 اختيار جودة الأفلام بدون ترقية وهمية (4-Tier Anti-Upscale):**
+  - أولوية ذكية للنسخ الأصلية غير المضغوطة: `4K Remux` ← `1080p Remux` ← `4K WEB-DL` ← `1080p WEB-DL`.
+  - استبعاد نسخ الكاميرا والترقيات المزيفة (Fake Upscales) والـ AV1/الدبلجات غير المطلوبة.
+- **💬 محرك الترجمة العربية الذكي (`SubSource` + `SubDL`):**
+  - جلب الترجمات العربية حصرياً من **SubSource** و **SubDL** (بدون OpenSubtitles أو الترجمات الآلية الضعيفة).
+  - تصنيف ذكي: **المنصات الرسمية** (Netflix, Prime, Apple TV+, Disney+, Shahid, OSN...) ثم **المترجمون الموثوقون**، مع إزالة التكرار على مستوى الحوارات وتنظيف الإعلانات.
+  - مزامنة تلقائية دقيقة عبر `alass` (تدعم الصوت ومسارات PGS `.sup` المدمجة) ودمج في حاوية `.mkv`، مع حفظ الترجمات في مجلد مخصص ومنظم.
+- **🎮 أمان الألعاب (Strict Megathread Policy):**
+  - حصر البحث والتحميل في المصادر الموثوقة المعتمدة في `r/PiratedGames` و `r/Piracy` (`FitGirl Repacks`, `DODI Repacks`, `GOG-Games`, `Online-Fix`, `RuTracker`, `SteamRIP`).
+  - حظر تام للمواقع والرافعين غير الموثوقين ومواقع مجموعات المشهد المزيفة.
+- **🔌 متوافق مع بروتوكول MCP:**
+  - يعمل مباشرة كـ **MCP Server** مع **Google Antigravity** و **Claude Code** و **Codex** و **Claude Desktop**.
 
 ---
 
 ## 🚀 التثبيت السريع (Quick Installation)
 
-### 1. تثبيت كمهارة في Google Antigravity:
-ضع مجلد `skills/torrentx` داخل مسار مهاراتك:
+### 1. عبر PowerShell (ويندوز)
 ```powershell
-# مسار المهارات العالمي
-~/.gemini/config/skills/torrentx/
+irm https://raw.githubusercontent.com/9jfcc/TorrentX/main/install.ps1 | iex
 ```
+سيقوم تلقائياً بتنزيل ملفات المهارة إلى `~/.gemini/config/skills/torrentx` وتثبيت `Aria2` إذا لم يكن موجوداً.
 
-### 2. معالج الإعداد التفاعلي (Setup Wizard):
-قم بتشغيل معالج الإعداد السريع لربط مفتاح Real-Debrid واختيار برامج التشغيل والتحميل:
-```powershell
-python skills/torrentx/setup_wizard.py
+### 2. إضافة إعدادات TorBox ومفاتيح الترجمة
+أنشئ ملف الإعدادات `~/.gemini/config/debrid.json`:
+```json
+{
+  "default_service": "torbox",
+  "services": {
+    "torbox": {
+      "api_key": "YOUR_TORBOX_API_KEY"
+    }
+  }
+}
 ```
+وملف `~/.gemini/config/subtitles.json` لمفاتيح **SubDL** و **SubSource** (اختياري لزيادة عدد الطلبات).
 
-### 3. تشغيل المساعد الذكي بالأوامر:
-```powershell
-python skills/torrentx/ai_assistant.py "حمل لي اول حلقة من مسلسل Band of Brothers بدون ضغط نسخه 4k مع ترجمه عربية"
-```
-
----
-
-## 🤖 أوامر البوتات (Bots & Automation)
-
-- **تشغيل كل البوتات بالخلفية:**
+### 3. استخدام المهارة والـ MCP في Claude Code / Codex
+- **Claude Code:**
   ```powershell
-  python skills/torrentx/run_all_bots.py
+  claude mcp add torrentx -- "path\to\torrentx.exe" mcp
   ```
-- **تشغيل بوت تيليجرام منفصلاً:**
-  ```powershell
-  python skills/torrentx/telegram_bot.py
+  وانسخ مجلد `skills/torrentx` إلى `~/.claude/skills/torrentx`.
+- **Codex:**
+  أضف في `~/.codex/config.toml`:
+  ```toml
+  [mcp_servers.torrentx]
+  command = "path\\to\\torrentx.exe"
+  args = ["mcp"]
   ```
-- **تشغيل بوت ديسكورد منفصلاً:**
-  ```powershell
-  python skills/torrentx/discord_bot.py
-  ```
+  وانسخ مجلد `skills/torrentx` إلى `~/.codex/skills/torrentx`.
 
 ---
 
 ## 📄 الترخيص (License)
-
-هذا المشروع مرخص تحت رخصة [MIT License](LICENSE).
+هذا المشروع مرخص تحت رخصة [MIT License](https://github.com/9jfcc/TorrentX/blob/main/LICENSE).

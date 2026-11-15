@@ -2,7 +2,7 @@
 .SYNOPSIS
     TorrentX One-Line Installer for Windows & Antigravity
 .DESCRIPTION
-    Installs the TorrentX skill, configures Aria2, and sets up Real-Debrid with zero hassle.
+    Installs the TorrentX skill and configures Aria2 for TorBox cloud downloads.
 #>
 
 try {
@@ -21,8 +21,8 @@ Write-Host @"
       | | (_) | |  | | |  __/ | | | | |_  / . \ 
       \_/\___/|_|  |_|  \___|_| |_|  \__|/_/ \_\
       
-   [+] AI-Powered Media Engine & Antigravity Skill
-   [+] Real-Debrid Cloud Streaming, Aria2 & Subtitles
+   [+] AI-Powered Media & Game Engine Skill
+   [+] TorBox Cloud Caching, Aria2 & Arabic Subtitles
 ===================================================================
 "@ -ForegroundColor Cyan
 
@@ -76,14 +76,4 @@ Write-Host "`n==================================================================
 Write-Host "  [SUCCESS] TorrentX installed successfully in Google Antigravity!  " -ForegroundColor Green
 Write-Host "===================================================================" -ForegroundColor Green
 
-# Launch setup wizard if python is installed
-$pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
-if ($pythonCmd) {
-    $wizardScript = Join-Path $targetDir "setup_wizard.py"
-    if (Test-Path $wizardScript) {
-        Write-Host "`n[*] Launching Interactive Setup Wizard...`n" -ForegroundColor Cyan
-        & python $wizardScript
-    }
-} else {
-    Write-Host "`n[!] Please install Python 3 to run the AI assistant." -ForegroundColor Red
-}
+Write-Host "`n[*] Next step: add your TorBox API key to $env:USERPROFILE\.gemini\config\debrid.json" -ForegroundColor Cyan

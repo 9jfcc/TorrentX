@@ -11,7 +11,7 @@ try:
 except Exception:
     pass
 
-CONFIG_PATH = r"C:\Users\username\.gemini\config\media_organizer.json"
+CONFIG_PATH = os.path.expanduser(r"~\.gemini\config\media_organizer.json")
 
 def load_config():
     default_cfg = {
