@@ -639,7 +639,14 @@ def select_best_movie_release(streams):
 
     # Prefer cached candidates from the highest available tier (1 -> 2 -> 3 -> 4 -> 5)
     cached_pool = [c for c in pool if c["is_cached"]]
-    working_pool = cached_pool if cached_pool else pool
+    if cached_pool:
+        working_pool = cached_pool
+    else:
+        # P2P mode (no debrid): exclude dead 0-seeder torrents and boost well-seeded releases
+        seeded_pool = [c for c in pool if c["seeders"] > 0]
+        working_pool = seeded_pool if seeded_pool else pool
+        for c in working_pool:
+            c["q_score"] += min(c["seeders"], 500) * 3
 
     # Sort by: Tier ascending (1 is best), then q_score descending!
     working_pool.sort(key=lambda x: (x["tier"], -x["q_score"]))
