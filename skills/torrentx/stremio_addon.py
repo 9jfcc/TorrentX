@@ -375,48 +375,80 @@ CONFIGURE_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>إعداد إضافة TorrentX</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; max-width: 560px; margin: 40px auto; padding: 24px; }
-  .card { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; }
-  label { display: block; margin-top: 14px; font-weight: 600; }
-  select, input { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; }
-  button { margin-top: 20px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #3b82f6; color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; min-height: 100vh; font-family: system-ui, -apple-system, sans-serif; background: #0b1120; color: #f8fafc; }
+  .page { width: 100%; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 32px 6vw; }
+  .card { width: 100%; background: #1e293b; border-radius: 16px; padding: 36px 40px; border: 1px solid #334155; box-shadow: 0 20px 50px rgba(0,0,0,0.45); }
+  h2 { margin-top: 0; font-size: 28px; }
+  p { color: #cbd5e1; font-size: 16px; }
+  label { display: block; margin-top: 18px; font-weight: 600; font-size: 15px; }
+  select, input { width: 100%; padding: 14px; margin-top: 8px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 15px; }
+  .api-row { display: flex; gap: 10px; align-items: stretch; margin-top: 8px; }
+  .api-row input { margin-top: 0; flex: 1; }
+  .btn-api { display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; padding: 0 18px; border-radius: 10px; background: #10b981; color: #fff; font-weight: 700; text-decoration: none; font-size: 14px; transition: background 0.15s; }
+  .btn-api:hover { background: #059669; }
+  button { margin-top: 24px; width: 100%; padding: 15px; border: none; border-radius: 10px; background: #3b82f6; color: #fff; font-size: 17px; font-weight: bold; cursor: pointer; }
   button:hover { background: #2563eb; }
-  .out { margin-top: 16px; padding: 12px; background: #0f172a; border-radius: 8px; word-break: break-all; display: none; }
+  .out { margin-top: 20px; padding: 18px; background: #0f172a; border: 1px solid #334155; border-radius: 10px; word-break: break-all; display: none; }
+  .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .actions button, .actions a { margin-top: 0; flex: 1; min-width: 160px; padding: 12px; border-radius: 8px; text-align: center; text-decoration: none; font-weight: 700; font-size: 14px; }
+  .btn-copy { background: #475569; color: #fff; }
+  .btn-install { background: #8b5cf6; color: #fff; }
 </style>
 </head>
 <body>
-<div class="card">
-  <h2>⚡ إعداد إضافة TorrentX</h2>
-  <p>اختر وضع التشغيل (بـ ديبرد للكاش السحابي فقط، أو بدون ديبرد للسييدرز النشطين فقط):</p>
-  <label>وضع التشغيل (Mode)</label>
-  <select id="mode" onchange="toggleDebrid()">
-    <option value="debrid">مع خدمة ديبرد (Cached-Only)</option>
-    <option value="p2p">بدون ديبرد (P2P - Seeders Only)</option>
-  </select>
-  <div id="debridBox">
-    <label>خدمة الديبرد</label>
-    <select id="service">
-      <option value="torbox">TorBox</option>
-      <option value="realdebrid">Real-Debrid</option>
-      <option value="alldebrid">AllDebrid</option>
-      <option value="premiumize">Premiumize</option>
-      <option value="debridlink">Debrid-Link</option>
-      <option value="offcloud">Offcloud</option>
-      <option value="putio">Put.io</option>
+<div class="page">
+  <div class="card">
+    <h2>⚡ إعداد إضافة TorrentX</h2>
+    <p>اختر وضع التشغيل (مع خدمة ديبرد للكاش السحابي، أو بدون ديبرد لنسخ التورنت ذات السييدرز النشطين فقط):</p>
+    <label>وضع التشغيل (Mode)</label>
+    <select id="mode" onchange="toggleDebrid()">
+      <option value="debrid">مع خدمة ديبرد (Cached-Only + P2P Fallback)</option>
+      <option value="p2p">بدون ديبرد (P2P - Seeders Only)</option>
     </select>
-    <label>مفتاح الـ API</label>
-    <input id="apikey" type="password" placeholder="ضع مفتاح API هنا">
+    <div id="debridBox">
+      <label>خدمة الديبرد</label>
+      <select id="service" onchange="updateApiLink()">
+        <option value="torbox">TorBox</option>
+        <option value="realdebrid">Real-Debrid</option>
+        <option value="alldebrid">AllDebrid</option>
+        <option value="premiumize">Premiumize</option>
+        <option value="debridlink">Debrid-Link</option>
+        <option value="offcloud">Offcloud</option>
+        <option value="putio">Put.io</option>
+      </select>
+      <label>مفتاح الـ API</label>
+      <div class="api-row">
+        <input id="apikey" type="password" placeholder="ضع مفتاح API هنا">
+        <a id="apiLink" class="btn-api" href="https://torbox.app/settings?section=account" target="_blank" rel="noopener">🔑 جلب مفتاح API</a>
+      </div>
+    </div>
+    <button onclick="gen()">إنشاء رابط التثبيت</button>
+    <div id="out" class="out"></div>
   </div>
-  <button onclick="gen()">إنشاء رابط التثبيت</button>
-  <div id="out" class="out"></div>
 </div>
 <script>
+const API_URLS = {
+  torbox: 'https://torbox.app/settings?section=account',
+  realdebrid: 'https://real-debrid.com/apitoken',
+  alldebrid: 'https://alldebrid.com/apikeys',
+  premiumize: 'https://www.premiumize.me/account',
+  debridlink: 'https://debrid-link.com/webapp/apikey',
+  offcloud: 'https://offcloud.com/account',
+  putio: 'https://app.put.io/settings/account'
+};
+function updateApiLink() {
+  const svc = document.getElementById('service').value;
+  document.getElementById('apiLink').href = API_URLS[svc] || '#';
+}
 function toggleDebrid() {
   document.getElementById('debridBox').style.display =
     document.getElementById('mode').value === 'debrid' ? 'block' : 'none';
 }
+let lastUrl = '';
 function gen() {
   const cfg = {
     mode: document.getElementById('mode').value,
@@ -424,10 +456,13 @@ function gen() {
     api_key: document.getElementById('apikey').value.trim()
   };
   const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(cfg)))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
-  const url = window.location.origin + '/' + b64 + '/manifest.json';
+  lastUrl = window.location.origin + '/' + b64 + '/manifest.json';
+  const stremioUrl = lastUrl.replace(/^https?:\\/\\//, 'stremio://');
   const el = document.getElementById('out');
   el.style.display = 'block';
-  el.innerHTML = '<b>رابط الإضافة (انسخه في Harbor / Stremio / Nuvio):</b><br><br>' + url;
+  el.innerHTML = '<b>رابط الإضافة (انسخه في Harbor / Stremio / Nuvio):</b><br><br>' + lastUrl +
+    '<div class="actions"><button class="btn-copy" onclick="navigator.clipboard.writeText(lastUrl)">📋 نسخ الرابط</button>' +
+    '<a class="btn-install" href="' + stremioUrl + '">⚡ تثبيت مباشر</a></div>';
 }
 </script>
 </body>
