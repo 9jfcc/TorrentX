@@ -136,7 +136,7 @@ def format_streams(raw_streams, mode, svc_id, media_id=None):
             5: f"Tier 5 • {res} Encode",
         }.get(tier, f"Tier {tier}")
 
-        if mode == "debrid" and item.get("is_cached"):
+        if mode == "debrid" and c.get("is_cached"):
             badge = f"⚡ {svc_id.upper()} CACHED"
         else:
             badge = f"🌱 {c['seeders']} Seeders" + (" (Uncached)" if mode == "debrid" else "")
