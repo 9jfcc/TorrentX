@@ -460,9 +460,29 @@ function gen() {
   const stremioUrl = lastUrl.replace(/^https?:\\/\\//, 'stremio://');
   const el = document.getElementById('out');
   el.style.display = 'block';
-  el.innerHTML = '<b>رابط الإضافة (انسخه في Harbor / Stremio / Nuvio):</b><br><br>' + lastUrl +
-    '<div class="actions"><button class="btn-copy" onclick="navigator.clipboard.writeText(lastUrl)">📋 نسخ الرابط</button>' +
-    '<a class="btn-install" href="' + stremioUrl + '">⚡ تثبيت مباشر</a></div>';
+  el.innerHTML = '<b>رابط الإضافة (الصقه في Harbor / Stremio / Nuvio):</b><br><br>' + lastUrl +
+    '<div class="actions"><button class="btn-copy" onclick="copyLink()">📋 نسخ الرابط</button>' +
+    '<a id="installBtn" class="btn-install" href="#" onclick="return smartInstall()">⚡ فتح Harbor + نسخ الرابط</a></div>' +
+    '<p id="hint" style="margin-top:10px;font-size:13px;color:#94a3b8;display:none;"></p>';
+  if (window.location.protocol === 'https:') {
+    document.getElementById('installBtn').href = stremioUrl;
+    document.getElementById('installBtn').textContent = '⚡ تثبيت مباشر';
+  }
+}
+function copyLink() {
+  navigator.clipboard.writeText(lastUrl);
+  const h = document.getElementById('hint');
+  h.style.display = 'block';
+  h.textContent = '✅ تم نسخ الرابط! الصقه في خانة الإضافات داخل Harbor واضغط تثبيت.';
+}
+function smartInstall() {
+  if (window.location.protocol === 'https:') return true;
+  navigator.clipboard.writeText(lastUrl);
+  fetch('/open_harbor').catch(() => {});
+  const h = document.getElementById('hint');
+  h.style.display = 'block';
+  h.textContent = '✅ تم نسخ الرابط وفتح Harbor! فقط الصق الرابط (Ctrl+V) في صفحة الإضافات واضغط تثبيت (بروتوكول stremio:// يتطلب HTTPS).';
+  return false;
 }
 </script>
 </body>
@@ -505,6 +525,14 @@ class AddonHandler(BaseHTTPRequestHandler):
 
         if not parts or parts == ["configure"]:
             return self._send_bytes(CONFIGURE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+
+        if parts == ["open_harbor"]:
+            import subprocess
+            harbor_exe = os.path.expanduser(r"~\AppData\Local\Harbor\harbor.exe")
+            if os.path.exists(harbor_exe):
+                subprocess.Popen([harbor_exe], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                return self._send_json({"ok": True})
+            return self._send_json({"ok": False, "error": "Harbor not found"}, status=404)
 
         if parts[0] == "sub_dl" and len(parts) == 2:
             token = parts[1].replace(".srt", "")
