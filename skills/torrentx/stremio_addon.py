@@ -251,7 +251,7 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
     return ranked_p2p
 
 
-def _extract_first_2min_ref_timestamps(media_url, timeout=8):
+def _extract_first_2min_ref_timestamps(media_url, timeout=3):
     """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
     import subprocess
@@ -265,7 +265,7 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=8):
         stream_sel = "s:0"
         probe_s = subprocess.run(
             [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", media_url],
-            capture_output=True, text=True, timeout=4, encoding="utf-8", errors="replace"
+            capture_output=True, text=True, timeout=2, encoding="utf-8", errors="replace"
         )
         if probe_s.returncode == 0 and probe_s.stdout:
             s_list = json.loads(probe_s.stdout).get("streams") or []
@@ -396,7 +396,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         candidates = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for idx, c in enumerate(candidates[:10]):
+        for idx, c in enumerate(candidates[:6]):
             try:
                 token = uuid.uuid4().hex[:16]
                 dl = subtitle_manager.download_subtitle_file(c, tmpdir, file_basename=token)
@@ -415,7 +415,17 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
                         sync_tag = f" [Synced {offset:+.1f}s]"
 
                 SUB_CACHE[token] = {"bytes": text.encode("utf-8"), "ts": now}
-                label = c.get("release_name") or c.get("source") or f"Arabic #{idx+1}"
+                trans = c.get("translator") or c.get("author") or ""
+                prov = (c.get("provider") or "").upper()
+                name = c.get("name") or c.get("release_name") or ""
+                label_parts = []
+                if prov:
+                    label_parts.append(prov)
+                if trans:
+                    label_parts.append(trans)
+                elif name:
+                    label_parts.append(name[:28])
+                label = " • ".join(label_parts) if label_parts else f"Arabic #{idx+1}"
                 subs.append({
                     "id": f"tx-{token}",
                     "lang": "ara",
@@ -653,11 +663,20 @@ class AddonHandler(BaseHTTPRequestHandler):
             streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale, media_type=media_type)
             return self._send_json({"streams": streams})
 
-        if len(parts) == 3 and parts[0] == "subtitles" and parts[2].endswith(".json"):
+        if len(parts) >= 3 and parts[0] == "subtitles":
             media_type = parts[1]
-            media_id = parts[2][:-5]
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            filename = (qs.get("filename") or [None])[0]
+            if len(parts) == 3:
+                media_id = parts[2][:-5] if parts[2].endswith(".json") else parts[2]
+                extra_str = ""
+            else:
+                media_id = parts[2]
+                extra_part = parts[3]
+                extra_str = extra_part[:-5] if extra_part.endswith(".json") else extra_part
+
+            extra_params = urllib.parse.parse_qs(extra_str) if extra_str else {}
+            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            filename = (extra_params.get("filename") or query_params.get("filename") or [None])[0]
+
             id_parts = media_id.split(":")
             imdb_id = id_parts[0]
             season = int(id_parts[1]) if len(id_parts) > 1 and id_parts[1].isdigit() else None
