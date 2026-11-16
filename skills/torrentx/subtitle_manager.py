@@ -392,9 +392,9 @@ def is_banned_subtitle(item):
 # ==========================================
 # 1. SubDL API Integration (Official API Only)
 # ==========================================
-def search_subdl(query, imdb_id=None, season=None, episode=None, lang="ar"):
+def search_subdl(query, imdb_id=None, season=None, episode=None, lang="ar", api_key=None):
     cfg = load_config()
-    api_key = cfg.get("services", {}).get("subdl", {}).get("api_key")
+    api_key = api_key or cfg.get("services", {}).get("subdl", {}).get("api_key")
     if not api_key:
         return {"error": True, "provider": "subdl", "message": "SubDL API key not configured"}
 
@@ -458,9 +458,9 @@ def search_subdl(query, imdb_id=None, season=None, episode=None, lang="ar"):
 # ==========================================
 # 2. SubSource API Integration (Official API Only)
 # ==========================================
-def search_subsource(query, imdb_id=None, season=None, episode=None, lang="arabic"):
+def search_subsource(query, imdb_id=None, season=None, episode=None, lang="arabic", api_key=None):
     cfg = load_config()
-    api_key = cfg.get("services", {}).get("subsource", {}).get("api_key")
+    api_key = api_key or cfg.get("services", {}).get("subsource", {}).get("api_key")
     if not api_key:
         return {"error": True, "provider": "subsource", "message": "SubSource API key not configured"}
 
@@ -528,13 +528,69 @@ def search_subsource(query, imdb_id=None, season=None, episode=None, lang="arabi
                     "commentary": item.get("commentary") or "",
                     "preview": item.get("preview") or "",
                     "hi": bool(item.get("hearingImpaired", False)),
-                    "download_url": f"https://api.subsource.net/api/v1/subtitles/{sub_id}/download"
+                    "download_url": f"https://api.subsource.net/api/v1/subtitles/{sub_id}/download",
+                    "_api_key": api_key
                 }
                 if not is_banned_subtitle(entry):
                     results.append(entry)
             return {"success": True, "provider": "subsource", "count": len(results), "subtitles": results}
     except Exception as e:
         return {"error": True, "provider": "subsource", "message": f"Subtitles query failed: {e}"}
+
+
+# ==========================================
+# 3. Wyzie Subs API Integration (Optional User Key)
+# ==========================================
+def search_wyzie(imdb_id, season=None, episode=None, lang="ar", api_key=None):
+    if not imdb_id:
+        return {"error": True, "provider": "wyzie", "message": "IMDb ID required for Wyzie"}
+    cfg = load_config()
+    api_key = api_key or cfg.get("services", {}).get("wyzie", {}).get("api_key")
+    if not api_key:
+        return {"error": True, "provider": "wyzie", "message": "Wyzie API key not configured"}
+
+    clean_imdb = imdb_id if str(imdb_id).startswith("tt") else f"tt{imdb_id}"
+    params = {"id": clean_imdb, "language": "ar" if lang in ("ar", "ara", "arabic") else lang, "key": api_key}
+    if season:
+        params["season"] = season
+    if episode:
+        params["episode"] = episode
+
+    url = f"https://sub.wyzie.io/search?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, list):
+                return {"error": True, "provider": "wyzie", "message": "Unexpected Wyzie response"}
+            results = []
+            for s in data:
+                dl_url = s.get("url") or ""
+                if not dl_url:
+                    continue
+                src_tag = str(s.get("source") or "")
+                rel_name = s.get("release") or s.get("media") or f"Wyzie-{src_tag}"
+                item = {
+                    "provider": "wyzie",
+                    "id": dl_url,
+                    "name": str(rel_name),
+                    "author": src_tag,
+                    "commentary": src_tag,
+                    "production_type": "",
+                    "release_type": "",
+                    "all_releases": [str(rel_name)],
+                    "downloads": 0,
+                    "rating_good": 0,
+                    "preview": "",
+                    "language": s.get("language") or "ar",
+                    "download_url": dl_url,
+                    "hi": bool(s.get("isHearingImpaired", False)),
+                }
+                if not is_banned_subtitle(item):
+                    results.append(item)
+            return {"success": True, "provider": "wyzie", "count": len(results), "subtitles": results}
+    except Exception as e:
+        return {"error": True, "provider": "wyzie", "message": str(e)}
 
 
 def deduce_release_type(name, all_releases=None, commentary=None):
@@ -562,9 +618,9 @@ def deduce_release_type(name, all_releases=None, commentary=None):
 # ==========================================
 # Parallel Search & Two-Tier Ranking (SubSource + SubDL ONLY)
 # ==========================================
-def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, season=None, episode=None):
+def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, season=None, episode=None, subdl_key=None, subsource_key=None, wyzie_key=None):
     """
-    Searches ONLY SubSource and SubDL in parallel (takes ~1 second),
+    Searches SubSource, SubDL, and optionally Wyzie (if wyzie_key configured) in parallel,
     classifies into Tier 1 (Official Platforms) and Tier 2 (Translators/Teams),
     and deduplicates previews.
     """
@@ -576,11 +632,14 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
         "sources": {}
     }
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_subsource = pool.submit(search_subsource, query, imdb_id, season, episode, "arabic" if lang in ["ar", "ara"] else lang)
-        fut_subdl = pool.submit(search_subdl, query, imdb_id, season, episode, lang)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_subsource = pool.submit(search_subsource, query, imdb_id, season, episode, "arabic" if lang in ["ar", "ara"] else lang, subsource_key)
+        fut_subdl = pool.submit(search_subdl, query, imdb_id, season, episode, lang, subdl_key)
+        fut_wyzie = pool.submit(search_wyzie, imdb_id, season, episode, lang, wyzie_key) if (wyzie_key or load_config().get("services", {}).get("wyzie", {}).get("api_key")) else None
         results["sources"]["subsource"] = fut_subsource.result()
         results["sources"]["subdl"] = fut_subdl.result()
+        if fut_wyzie is not None:
+            results["sources"]["wyzie"] = fut_wyzie.result()
 
     combined = []
     target_rel = (release_type or "").lower()
@@ -588,7 +647,7 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
     want_web = any(k in target_rel for k in ["web", "web-dl", "webrip"])
 
     # Prioritize SubSource first because it has rich metadata (productionType, commentary, preview, ratings)
-    for prov in ["subsource", "subdl"]:
+    for prov in ["subsource", "subdl", "wyzie"]:
         data = results["sources"].get(prov, {})
         if not data.get("success"):
             continue
@@ -768,7 +827,7 @@ def download_subtitle_file(sub_item, output_dir, file_basename=None):
 
     headers = {"User-Agent": "Mozilla/5.0"}
     if provider == "subsource":
-        api_key = cfg.get("services", {}).get("subsource", {}).get("api_key")
+        api_key = sub_item.get("_api_key") or cfg.get("services", {}).get("subsource", {}).get("api_key")
         if api_key:
             headers["X-API-Key"] = api_key
 

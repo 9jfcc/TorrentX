@@ -21,8 +21,11 @@
 - **🎮 أمان الألعاب (Strict Megathread Policy):**
   - حصر البحث والتحميل في المصادر الموثوقة المعتمدة في `r/PiratedGames` و `r/Piracy` (`FitGirl Repacks`, `DODI Repacks`, `GOG-Games`, `Online-Fix`, `RuTracker`, `SteamRIP`).
   - حظر تام للمواقع والرافعين غير الموثوقين ومواقع مجموعات المشهد المزيفة.
-- **🔌 متوافق مع بروتوكول MCP:**
-  - يعمل مباشرة كـ **MCP Server** مع **Google Antigravity** و **Claude Code** و **Codex** و **Claude Desktop**.
+- **🔌 متوافق مع بروتوكول MCP وإضافات Stremio / Harbor / Nuvio:**
+  - يعمل كـ **MCP Server** مع **Google Antigravity** و **Claude Code** و **Codex**.
+  - ويتضمن إضافة مستقلة (`stremio_addon.py`) تعمل بدون AI لبرامج **Harbor** و **Stremio** و **Nuvio** مع صفحة إعدادات لاختيار خدمة الديبرد أو P2P، السماح/منع الأبسكيل، وإضافة مفاتيح الترجمة (`SubDL`, `SubSource`, `Wyzie`).
+
+> **⚠️ ملاحظة لمستخدمي برنامج Harbor:** يفعل Harbor افتراضياً مستوى `Strict` لفلتر البث مما قد يحجب الأفلام الحديثة خلف زر "بحث أوسع". لتجنب ذلك، من إعدادات Harbor ← البث ← مستوى فلتر البث (`Stream Filter Level`) اختر **بدون تصفية (Off)** أو **متوازن (Balanced)**.
 
 ---
 

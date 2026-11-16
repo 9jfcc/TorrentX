@@ -104,12 +104,12 @@ def fetch_torrentio_streams(media_type, media_id, svc_id, api_key):
         return []
 
 
-def format_streams(raw_streams, mode, svc_id, media_id=None):
+def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False):
     """Filters, ranks by Tier (Best -> Worst), and formats into Stremio stream objects."""
     if not raw_streams:
         return []
 
-    candidates = _rank_all_candidates(raw_streams, mode)
+    candidates = _rank_all_candidates(raw_streams, mode, allow_upscale=allow_upscale)
     if media_id:
         STREAM_META_CACHE[media_id] = {
             "ts": time.time(),
@@ -159,8 +159,8 @@ def format_streams(raw_streams, mode, svc_id, media_id=None):
     return out
 
 
-def _rank_all_candidates(raw_streams, mode):
-    """Ranks all safe, anti-upscale candidates strictly by Tier (1->5) then quality/seeders."""
+def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
+    """Ranks all safe, anti-upscale (unless allow_upscale=True) candidates strictly by Tier (1->5)."""
     remaining = list(raw_streams)
     ranked_cached = []
     ranked_p2p = []
@@ -169,7 +169,7 @@ def _rank_all_candidates(raw_streams, mode):
     for _ in range(30):
         if not remaining:
             break
-        best, top6 = debrid_manager.select_best_movie_release(remaining)
+        best, top6 = debrid_manager.select_best_movie_release(remaining, allow_upscale=allow_upscale)
         if not best:
             break
         batch = [best] + [x for x in top6 if x is not best]
@@ -294,8 +294,8 @@ def _compute_fast_offset(ref_times, sub_times):
     return 0.0
 
 
-def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None):
-    """Fetches Arabic subtitles (SubSource + SubDL) matched by release_type + fast 2-min CDN offset sync."""
+def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None, url_cfg=None):
+    """Fetches Arabic subtitles (SubSource + SubDL + optional Wyzie) matched by release_type + fast CDN offset sync."""
     import tempfile
     now = time.time()
     for k in [k for k, v in SUB_CACHE.items() if now - v["ts"] > 7200]:
@@ -317,7 +317,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         release_type = chosen.get("release_type")
         cdn_url = chosen.get("url")
 
-    # 2. Extract first ~2.5 min reference timestamps from CDN URL (if available)
+    # 2. Extract first ~3 min reference timestamps from CDN URL (if available)
     ref_times = _extract_first_2min_ref_timestamps(cdn_url) if cdn_url else []
 
     # 3. Resolve canonical movie title for better SubDL/SubSource matching
@@ -329,10 +329,16 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
     except Exception:
         pass
 
+    subdl_key = (url_cfg or {}).get("subdl_key") or None
+    subsource_key = (url_cfg or {}).get("subsource_key") or None
+    wyzie_key = (url_cfg or {}).get("wyzie_key") or None
+
     subs = []
     try:
         res = subtitle_manager.search_all_subtitles(
-            query_title, imdb_id=imdb_id, lang="ar", release_type=release_type, season=season, episode=episode
+            query_title, imdb_id=imdb_id, lang="ar", release_type=release_type,
+            season=season, episode=episode,
+            subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
         )
         candidates = res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
     except Exception:
@@ -383,13 +389,15 @@ CONFIGURE_HTML = """<!DOCTYPE html>
   .page { width: 100%; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 32px 6vw; }
   .card { width: 100%; background: #1e293b; border-radius: 16px; padding: 36px 40px; border: 1px solid #334155; box-shadow: 0 20px 50px rgba(0,0,0,0.45); }
   h2 { margin-top: 0; font-size: 28px; }
-  p { color: #cbd5e1; font-size: 16px; }
-  label { display: block; margin-top: 18px; font-weight: 600; font-size: 15px; }
-  select, input { width: 100%; padding: 14px; margin-top: 8px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 15px; }
-  .api-row { display: flex; gap: 10px; align-items: stretch; margin-top: 8px; }
+  h3 { margin: 28px 0 8px; font-size: 18px; color: #93c5fd; border-bottom: 1px solid #334155; padding-bottom: 6px; }
+  p { color: #cbd5e1; font-size: 15px; }
+  label { display: block; margin-top: 14px; font-weight: 600; font-size: 14px; }
+  select, input { width: 100%; padding: 13px; margin-top: 6px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 14px; }
+  .api-row { display: flex; gap: 10px; align-items: stretch; margin-top: 6px; }
   .api-row input { margin-top: 0; flex: 1; }
-  .btn-api { display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; padding: 0 18px; border-radius: 10px; background: #10b981; color: #fff; font-weight: 700; text-decoration: none; font-size: 14px; transition: background 0.15s; }
+  .btn-api { display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; padding: 0 18px; border-radius: 10px; background: #10b981; color: #fff; font-weight: 700; text-decoration: none; font-size: 13px; transition: background 0.15s; min-width: 155px; }
   .btn-api:hover { background: #059669; }
+  .note { margin-top: 18px; padding: 14px 16px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.45); border-radius: 10px; font-size: 13px; color: #fde68a; line-height: 1.6; }
   button { margin-top: 24px; width: 100%; padding: 15px; border: none; border-radius: 10px; background: #3b82f6; color: #fff; font-size: 17px; font-weight: bold; cursor: pointer; }
   button:hover { background: #2563eb; }
   .out { margin-top: 20px; padding: 18px; background: #0f172a; border: 1px solid #334155; border-radius: 10px; word-break: break-all; display: none; }
@@ -404,6 +412,8 @@ CONFIGURE_HTML = """<!DOCTYPE html>
   <div class="card">
     <h2>⚡ إعداد إضافة TorrentX</h2>
     <p>اختر وضع التشغيل (مع خدمة ديبرد للكاش السحابي، أو بدون ديبرد لنسخ التورنت ذات السييدرز النشطين فقط):</p>
+
+    <h3>1. وضع التشغيل والديبرد</h3>
     <label>وضع التشغيل (Mode)</label>
     <select id="mode" onchange="toggleDebrid()">
       <option value="debrid">مع خدمة ديبرد (Cached-Only + P2P Fallback)</option>
@@ -420,12 +430,41 @@ CONFIGURE_HTML = """<!DOCTYPE html>
         <option value="offcloud">Offcloud</option>
         <option value="putio">Put.io</option>
       </select>
-      <label>مفتاح الـ API</label>
+      <label>مفتاح الـ API لخدمة الديبرد</label>
       <div class="api-row">
         <input id="apikey" type="password" placeholder="ضع مفتاح API هنا">
         <a id="apiLink" class="btn-api" href="https://torbox.app/settings?section=account" target="_blank" rel="noopener">🔑 جلب مفتاح API</a>
       </div>
     </div>
+
+    <h3>2. خيارات الجودة (Quality Filter)</h3>
+    <label>نسخ الأبسكيل (AI Upscale / 4K-8K Upscaled)</label>
+    <select id="allowUpscale">
+      <option value="false">لا — منع الأبسكيل والالتزام بالنسخ الأصلية فقط (موصى به)</option>
+      <option value="true">نعم — السماح بعرض نسخ الأبسكيل</option>
+    </select>
+
+    <h3>3. مفاتيح مواقع الترجمة (اختياري)</h3>
+    <label>مفتاح SubDL API</label>
+    <div class="api-row">
+      <input id="subdlKey" type="password" placeholder="مفتاح SubDL (اختياري)">
+      <a class="btn-api" href="https://subdl.com/panel/api" target="_blank" rel="noopener">🔑 جلب من SubDL</a>
+    </div>
+    <label>مفتاح SubSource API</label>
+    <div class="api-row">
+      <input id="subsourceKey" type="password" placeholder="مفتاح SubSource (اختياري)">
+      <a class="btn-api" href="https://subsource.net/" target="_blank" rel="noopener">🔑 جلب من SubSource</a>
+    </div>
+    <label>مفتاح Wyzie Subs API</label>
+    <div class="api-row">
+      <input id="wyzieKey" type="password" placeholder="مفتاح Wyzie (اختياري)">
+      <a class="btn-api" href="https://sub.wyzie.io/redeem" target="_blank" rel="noopener">🔑 جلب من Wyzie</a>
+    </div>
+
+    <div class="note">
+      ⚠️ <b>ملاحظة لمستخدمي Harbor:</b> يفعل برنامج Harbor افتراضياً خيار <b>Strict</b> لفلترة المصادر، وقد يحجب الأفلام الحديثة خلف زر "بحث أوسع". لتجنب ذلك، من إعدادات Harbor ← البث (Streaming) ← مستوى فلتر البث اختر <b>بدون تصفية (Off)</b> أو <b>متوازن (Balanced)</b>.
+    </div>
+
     <button onclick="gen()">إنشاء رابط التثبيت</button>
     <div id="out" class="out"></div>
   </div>
@@ -453,7 +492,11 @@ function gen() {
   const cfg = {
     mode: document.getElementById('mode').value,
     service: document.getElementById('service').value,
-    api_key: document.getElementById('apikey').value.trim()
+    api_key: document.getElementById('apikey').value.trim(),
+    allow_upscale: document.getElementById('allowUpscale').value === 'true',
+    subdl_key: document.getElementById('subdlKey').value.trim(),
+    subsource_key: document.getElementById('subsourceKey').value.trim(),
+    wyzie_key: document.getElementById('wyzieKey').value.trim()
   };
   const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(cfg)))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
   lastUrl = window.location.origin + '/' + b64 + '/manifest.json';
@@ -554,8 +597,9 @@ class AddonHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "stream" and parts[2].endswith(".json"):
             media_type = parts[1]
             media_id = parts[2][:-5]
+            allow_upscale = bool((url_cfg or {}).get("allow_upscale", False))
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
-            streams = format_streams(raw, mode, svc_id, media_id=media_id)
+            streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale)
             return self._send_json({"streams": streams})
 
         if len(parts) == 3 and parts[0] == "subtitles" and parts[2].endswith(".json"):
@@ -569,7 +613,7 @@ class AddonHandler(BaseHTTPRequestHandler):
             episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
             host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
             subs = fetch_subtitles_for_stremio(
-                imdb_id, host_base, season=season, episode=episode, filename=filename, full_media_id=media_id
+                imdb_id, host_base, season=season, episode=episode, filename=filename, full_media_id=media_id, url_cfg=url_cfg
             )
             return self._send_json({"subtitles": subs})
 

@@ -444,10 +444,10 @@ def parse_size_gb(desc_text):
     return round(val / 1024.0, 2) if unit == "MB" else val
 
 
-def select_best_movie_release(streams):
+def select_best_movie_release(streams, allow_upscale=False):
     """
     Implements the User's Strict Movie Quality Protocol:
-    1. NEVER allow AI Upscale (strict anti-upscale filter + fake 4K detection).
+    1. Reject AI Upscale by default (unless allow_upscale=True).
     2. Tier 1: 4K UHD BluRay Remux (2160p Remux, untouched disc, lossless audio).
     3. Tier 2: 1080p BluRay Remux (when movie has no 4K BluRay Remux, pick untouched 1080p BluRay Remux).
     4. Tier 3: 4K WEB-DL Untouched (when movie has no BluRay Remux, pick highest-bitrate uncompressed 4K WEB-DL).
@@ -496,7 +496,7 @@ def select_best_movie_release(streams):
         # Hard security & quality exclusions: executables/archives, AI Upscale, CAM/Screener, Full ISO/BDMV, Foreign-only dubs
         if dangerous_re.search(comb) or dangerous_re.search(direct_url):
             continue
-        if upscale_re.search(comb) or cam_re.search(comb) or full_disc_re.search(comb):
+        if (not allow_upscale and upscale_re.search(comb)) or cam_re.search(comb) or full_disc_re.search(comb):
             continue
         if is_foreign_only_dub(comb):
             continue
@@ -581,7 +581,7 @@ def select_best_movie_release(streams):
 
     filtered = []
     for c in parsed:
-        if c["res"] == "4K" and not c["is_remux"] and not has_4k_remux and not has_legit_4k_webdl and has_1080p_remux:
+        if not allow_upscale and c["res"] == "4K" and not c["is_remux"] and not has_4k_remux and not has_legit_4k_webdl and has_1080p_remux:
             # Unlabelled 4K upscale of a 1080p-only movie -> skip!
             continue
         filtered.append(c)
