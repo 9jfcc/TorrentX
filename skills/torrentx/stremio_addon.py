@@ -150,7 +150,7 @@ def _format_clean_stream_title(c, media_type="movie"):
     dur_sec = 2700 if (media_type == "series" or ep_m) else 7200
     est_mbps = round((size_gb * 8192) / dur_sec, 1) if size_gb > 0 else 0
     bitrate_str = f"⚡ ~{est_mbps} Mbps" if est_mbps > 0 else ""
-    ar_str = "🇸🇦 عربي مدمج" if c.get("has_arabic_flag") else "🌐 بدون علامة عربي"
+    ar_str = "🇸🇦 ترجمة عربية مدمجة" if c.get("has_arabic_flag") else "🌐 بدون ترجمة عربية"
 
     line2_parts = [p for p in [size_str, bitrate_str, ar_str] if p]
     return f"{line1}\n{' | '.join(line2_parts)}"
@@ -513,7 +513,7 @@ CONFIGURE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="note">
-      ⚠️ <b>ملاحظة لمستخدمي Harbor:</b> يفعل برنامج Harbor افتراضياً خيار <b>صارم (Strict)</b> لفلترة المصادر، وقد يحجب الأفلام الحديثة خلف زر "بحث أوسع". لتجنب ذلك، افتح <b>الإعدادات</b> في Harbor ← ابحث عن <b>مرشحات البث (Stream filters)</b> ← واختر <b>بدون تصفية (Off)</b> أو <b>متوازن (Balanced)</b>.
+      ⚠️ <b>ملاحظة لمستخدمي Harbor:</b> يفعل برنامج Harbor افتراضياً خيار <b>صارم</b> في فلتر أمان البث، وقد يحجب الأفلام الحديثة خلف زر "بحث أوسع". لتجنب ذلك، ادخل: <b>الإعدادات ← المصادر والمكتبة ← تفضيلات المصادر ← فلتر أمان البث</b> واختر <b>متوازن</b> (أو <b>إيقاف</b>) بدلاً من <b>صارم</b>.
     </div>
 
     <button onclick="gen()">إنشاء رابط التثبيت</button>
