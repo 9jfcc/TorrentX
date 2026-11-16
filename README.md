@@ -29,15 +29,22 @@
 
 ---
 
-## 🌐 النشر السحابي المجاني للإضافة (24/7 Free Cloud Hosting)
+## ⚡ تشغيل إضافة Stremio / Harbor بنقرة واحدة (One-Click Local Launcher)
 
-إذا أردت استخدام إضافة Stremio / Harbor أونلاين 24/7 من الهاتف أو الشاشة الذكية بدون الحاجة لتشغيل بايثون على جهازك:
+لأي مستخدم يريد تشغيل الإضافة على جهازه وفتح صفحة الإعدادات فوراً في المتصفح:
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/9jfcc/TorrentX)
-
-1. اضغط على زر **Deploy to Render** أعلاه (أو سجل في [render.com](https://render.com) مجاناً بحساب GitHub).
-2. اضغط **Apply / Create Web Service**.
-3. ستحصل خلال دقيقة على رابط دائم مجاني مثل: `https://torrentx-addon.onrender.com/configure` لتثبيت الإضافة في Harbor أو Stremio من أي جهاز بالعالم!
+- **على ويندوز:** فقط اضغط مرتين (Double Click) على ملف:
+  👉 **`TorrentX-Addon.bat`**
+- **على لينكس / ماك:**
+  ```bash
+  bash run_addon.sh
+  ```
+- **أو عبر بايثون مباشرة:**
+  ```bash
+  python skills/torrentx/stremio_addon.py
+  ```
+سيقوم تلقائياً بتشغيل السيرفر في الخلفية وفتح صفحة الإعداد فوراً في متصفحك الافتراضي:
+👉 **`http://127.0.0.1:7123/configure`**
 
 ---
 

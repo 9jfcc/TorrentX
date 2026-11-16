@@ -713,6 +713,18 @@ class AddonHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    import threading
+    import webbrowser
+
+    def _auto_open_browser():
+        time.sleep(0.6)
+        try:
+            webbrowser.open(f"http://127.0.0.1:{PORT}/configure")
+        except Exception:
+            pass
+
+    threading.Thread(target=_auto_open_browser, daemon=True).start()
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AddonHandler)
     print(f"TorrentX Stremio/Harbor/Nuvio Addon running at http://0.0.0.0:{PORT}/manifest.json")
     print(f"Configure page: http://127.0.0.1:{PORT}/configure")
