@@ -136,10 +136,10 @@ def format_streams(raw_streams, mode, svc_id, media_id=None):
             5: f"Tier 5 • {res} Encode",
         }.get(tier, f"Tier {tier}")
 
-        if mode == "debrid":
+        if mode == "debrid" and item.get("is_cached"):
             badge = f"⚡ {svc_id.upper()} CACHED"
         else:
-            badge = f"🌱 {c['seeders']} Seeders"
+            badge = f"🌱 {c['seeders']} Seeders" + (" (Uncached)" if mode == "debrid" else "")
 
         stream_obj = {
             "name": f"TorrentX\n{tier_short}\n{badge}",
@@ -161,14 +161,12 @@ def format_streams(raw_streams, mode, svc_id, media_id=None):
 
 def _rank_all_candidates(raw_streams, mode):
     """Ranks all safe, anti-upscale candidates strictly by Tier (1->5) then quality/seeders."""
-    # Use select_best_movie_release in batches? Even better: parse with the exact same rules
-    # by leveraging debrid_manager's select_best_movie_release on slices or directly:
     remaining = list(raw_streams)
-    ranked = []
+    ranked_cached = []
+    ranked_p2p = []
     seen = set()
 
-    # Iteratively extract top candidates up to 25 using debrid_manager's exact engine
-    for _ in range(25):
+    for _ in range(30):
         if not remaining:
             break
         best, top6 = debrid_manager.select_best_movie_release(remaining)
@@ -180,14 +178,12 @@ def _rank_all_candidates(raw_streams, mode):
             h = item.get("hash") or item.get("direct_url") or item.get("title")
             if h in seen:
                 continue
-            if mode == "debrid" and not item.get("is_cached"):
-                continue
-            if mode == "p2p" and item.get("seeders", 0) <= 0:
-                continue
             seen.add(h)
-            ranked.append(item)
             added_any = True
-        # Remove seen hashes from remaining
+            if item.get("is_cached"):
+                ranked_cached.append(item)
+            if item.get("seeders", 0) > 0:
+                ranked_p2p.append(item)
         remaining = [
             s for s in remaining
             if (s.get("infoHash") or s.get("url") or s.get("title")) not in seen
@@ -195,16 +191,17 @@ def _rank_all_candidates(raw_streams, mode):
         if not added_any:
             break
 
-    # Strict sort: Tier ascending (1 is best -> 5 is worst), then cached/seeders/score descending
-    if mode == "p2p":
-        ranked.sort(key=lambda x: (x["tier"], -x.get("seeders", 0), -x.get("q_score", 0)))
-    else:
-        ranked.sort(key=lambda x: (x["tier"], -x.get("q_score", 0)))
-    return ranked
+    if mode == "debrid" and ranked_cached:
+        ranked_cached.sort(key=lambda x: (x["tier"], -x.get("q_score", 0)))
+        return ranked_cached
+
+    # P2P mode OR Debrid fallback when 0 cached torrents exist on the server
+    ranked_p2p.sort(key=lambda x: (x["tier"], -x.get("seeders", 0), -x.get("q_score", 0)))
+    return ranked_p2p
 
 
 def _extract_first_2min_ref_timestamps(media_url, timeout=8):
-    """Reads ONLY the first ~2.5 minutes of embedded subtitle PTS timestamps from an HTTP CDN URL."""
+    """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
     import subprocess
     if not media_url or not media_url.startswith("http"):
@@ -213,10 +210,27 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=8):
     if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
         return []
     try:
+        # Step A: Pick best non-forced English (or first) subtitle stream index quickly
+        stream_sel = "s:0"
+        probe_s = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", media_url],
+            capture_output=True, text=True, timeout=4, encoding="utf-8", errors="replace"
+        )
+        if probe_s.returncode == 0 and probe_s.stdout:
+            s_list = json.loads(probe_s.stdout).get("streams") or []
+            for idx, st in enumerate(s_list):
+                tags = st.get("tags") or {}
+                lang = str(tags.get("language") or "").lower()
+                title = str(tags.get("title") or "").lower()
+                forced = (st.get("disposition") or {}).get("forced") == 1 or "forced" in title
+                if not forced and lang in ("eng", "en", "und", ""):
+                    stream_sel = f"s:{idx}"
+                    break
+
         cmd = [
             ffprobe, "-v", "quiet", "-print_format", "json",
-            "-select_streams", "s:0", "-show_packets",
-            "-read_intervals", "%+150", media_url,
+            "-select_streams", stream_sel, "-show_packets",
+            "-read_intervals", "%+180", media_url,
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         if res.returncode != 0 or not res.stdout:
@@ -227,50 +241,56 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=8):
             t = p.get("pts_time")
             if t is not None:
                 val = float(t)
-                if 1.0 <= val <= 155.0:
+                if 1.0 <= val <= 185.0:
                     pts_list.append(val)
-        # Deduplicate close timestamps (<0.3s)
         clean = []
         for val in sorted(pts_list):
             if not clean or (val - clean[-1]) > 0.35:
                 clean.append(val)
-        return clean[:40]
+        return clean[:50]
     except Exception:
         return []
 
 
 def _parse_srt_first_cues(srt_text):
-    """Returns start timestamps (seconds) of the first 25 cues in an SRT string."""
+    """Returns start timestamps (seconds) of the first 35 cues in an SRT string."""
     import re
     cues = []
     for m in re.finditer(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->", srt_text):
         h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
         sec = h * 3600 + mn * 60 + s + ms / 1000.0
-        if 1.0 <= sec <= 155.0:
+        if 1.0 <= sec <= 185.0:
             cues.append(sec)
-        if len(cues) >= 25:
+        if len(cues) >= 35:
             break
     return cues
 
 
 def _compute_fast_offset(ref_times, sub_times):
-    """Finds consistent constant offset (ref - sub) in seconds if within [-45s, +45s]."""
+    """Finds median consensus offset (ref - sub) in seconds with ~0.05s precision within [-45s, +45s]."""
     if len(ref_times) < 4 or len(sub_times) < 4:
         return 0.0
-    # Pair first cue alignments and pick the offset with highest inlier consensus (+/- 0.6s)
-    best_offset = 0.0
-    best_hits = 0
-    for r0 in ref_times[:6]:
-        for s0 in sub_times[:6]:
+    best_cand = 0.0
+    best_inliers = []
+    for r0 in ref_times[:10]:
+        for s0 in sub_times[:10]:
             cand = r0 - s0
             if abs(cand) > 45.0:
                 continue
-            hits = sum(1 for st in sub_times if any(abs((st + cand) - rt) <= 0.6 for rt in ref_times))
-            if hits > best_hits:
-                best_hits = hits
-                best_offset = cand
-    if best_hits >= max(3, min(len(sub_times), 6) // 2) and abs(best_offset) >= 0.25:
-        return round(best_offset, 3)
+            inliers = []
+            for st in sub_times:
+                # Find closest ref timestamp to (st + cand)
+                closest = min(ref_times, key=lambda rt: abs((st + cand) - rt))
+                if abs((st + cand) - closest) <= 0.45:
+                    inliers.append(closest - st)
+            if len(inliers) > len(best_inliers):
+                best_inliers = inliers
+                best_cand = cand
+    if len(best_inliers) >= max(4, min(len(sub_times), 8) // 2):
+        best_inliers.sort()
+        median_off = best_inliers[len(best_inliers) // 2]
+        if abs(median_off) >= 0.15:
+            return round(median_off, 3)
     return 0.0
 
 
