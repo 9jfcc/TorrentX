@@ -381,9 +381,46 @@ def _resolve_and_cache_sub(token):
         return None
 
 
-def _inject_harbor_addon(manifest_url, mode_label="TorrentX"):
+def _inject_harbor_addon(manifest_url, mode_label="TorrentX", url_cfg=None):
     try:
         user_data_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\user-data.json")
+        secrets_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\secrets.json")
+        settings_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\settings.json")
+        import json
+
+        # Update secrets.json with SubSource and SubDL keys
+        if os.path.exists(secrets_path):
+            try:
+                with open(secrets_path, "r", encoding="utf-8") as sf:
+                    s_data = json.load(sf)
+                inner = json.loads(s_data.get("harbor.settings-secrets.v1.shared", "{}"))
+                if url_cfg and url_cfg.get("subsource_key"):
+                    inner["subsourceApiKey"] = url_cfg["subsource_key"]
+                if url_cfg and url_cfg.get("subdl_key"):
+                    inner["subdlApiKey"] = url_cfg["subdl_key"]
+                if url_cfg and url_cfg.get("api_key") and (url_cfg.get("service") == "torbox"):
+                    inner["tbKey"] = url_cfg["api_key"]
+                s_data["harbor.settings-secrets.v1.shared"] = json.dumps(inner)
+                with open(secrets_path, "w", encoding="utf-8") as sf:
+                    json.dump(s_data, sf, ensure_ascii=False)
+            except Exception:
+                pass
+
+        # Update settings.json to enable sub providers
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as stf:
+                    st_data = json.load(stf)
+                sp = st_data.get("subProvidersEnabled", {})
+                sp["subsource"] = True
+                sp["subdl"] = True
+                sp["addons"] = True
+                st_data["subProvidersEnabled"] = sp
+                st_data["preferredSubLangs"] = ["Arabic"]
+                with open(settings_path, "w", encoding="utf-8") as stf:
+                    json.dump(st_data, stf, ensure_ascii=False)
+            except Exception:
+                pass
         if not os.path.exists(user_data_path):
             return False
         import json
@@ -719,6 +756,11 @@ class AddonHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        try:
+            with open(r"C:\Users\9jhp9\addon_requests.log", "a", encoding="utf-8") as _lf:
+                _lf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {self.command} {self.path}\n")
+        except Exception:
+            pass
         path = urllib.parse.urlparse(self.path).path.strip("/")
         parts = [urllib.parse.unquote(p) for p in path.split("/") if p]
 
@@ -765,6 +807,23 @@ class AddonHandler(BaseHTTPRequestHandler):
             allow_upscale = bool((url_cfg or {}).get("allow_upscale", False))
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
             streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale, media_type=media_type)
+
+            # Attach Arabic subtitles directly inside stream objects
+            try:
+                host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
+                id_parts = media_id.split(":")
+                imdb_id = id_parts[0]
+                season = int(id_parts[1]) if len(id_parts) > 1 and id_parts[1].isdigit() else None
+                episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
+                subs = fetch_subtitles_for_stremio(
+                    imdb_id, host_base, season=season, episode=episode, full_media_id=media_id, url_cfg=url_cfg
+                )
+                if subs:
+                    for s in streams:
+                        s["subtitles"] = subs
+            except Exception as e:
+                logger.warning("Error attaching subs to streams: %s", e)
+
             return self._send_json({"streams": streams})
 
         if len(parts) >= 3 and parts[0] == "subtitles":
