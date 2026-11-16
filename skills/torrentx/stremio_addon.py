@@ -527,10 +527,9 @@ class AddonHandler(BaseHTTPRequestHandler):
             return self._send_bytes(CONFIGURE_HTML.encode("utf-8"), "text/html; charset=utf-8")
 
         if parts == ["open_harbor"]:
-            import subprocess
             harbor_exe = os.path.expanduser(r"~\AppData\Local\Harbor\harbor.exe")
             if os.path.exists(harbor_exe):
-                subprocess.Popen([harbor_exe], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                os.startfile(harbor_exe)
                 return self._send_json({"ok": True})
             return self._send_json({"ok": False, "error": "Harbor not found"}, status=404)
 
