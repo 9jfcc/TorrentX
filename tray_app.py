@@ -12,16 +12,42 @@ import time
 import winreg
 import threading
 import webbrowser
+import uuid
+import json
+import base64
+import logging
+import hashlib
+import subprocess
+import zipfile
+import tempfile
+import shutil
+import re
+import unicodedata
+import struct
+import traceback
+import io
+import collections
+import concurrent.futures
+import urllib.request
+import urllib.parse
+import urllib.error
 from PIL import Image, ImageDraw
 import pystray
 
 # Ensure local skill modules can be imported
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-SKILL_DIR = os.path.join(APP_DIR, "skills", "torrentx")
-if SKILL_DIR not in sys.path:
-    sys.path.insert(0, SKILL_DIR)
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
+if getattr(sys, 'frozen', False):
+    BUNDLE_DIR = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.executable)))
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR = BUNDLE_DIR
+
+for base in [BUNDLE_DIR, APP_DIR]:
+    sdir = os.path.join(base, "skills", "torrentx")
+    if os.path.exists(sdir) and sdir not in sys.path:
+        sys.path.insert(0, sdir)
+    if base not in sys.path:
+        sys.path.insert(0, base)
 
 import stremio_addon
 
@@ -104,12 +130,12 @@ def on_exit(icon, item):
 
 
 def create_tray_icon():
-    ico_path = os.path.join(APP_DIR, "icon.ico")
-    if os.path.exists(ico_path):
-        try:
-            return Image.open(ico_path)
-        except Exception:
-            pass
+    for p in [os.path.join(APP_DIR, "icon.ico"), os.path.join(BUNDLE_DIR, "icon.ico")]:
+        if os.path.exists(p):
+            try:
+                return Image.open(p)
+            except Exception:
+                pass
 
     # Fallback generated icon (Dark blue with cyan lightning bolt)
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -141,4 +167,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        with open(os.path.expanduser(r"~\torrentx_crash.log"), "w", encoding="utf-8") as f:
+            import traceback
+            f.write(traceback.format_exc())
+        raise
