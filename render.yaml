@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: torrentx-addon
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    healthCheckPath: /manifest.json

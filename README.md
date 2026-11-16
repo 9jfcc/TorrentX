@@ -29,6 +29,18 @@
 
 ---
 
+## 🌐 النشر السحابي المجاني للإضافة (24/7 Free Cloud Hosting)
+
+إذا أردت استخدام إضافة Stremio / Harbor أونلاين 24/7 من الهاتف أو الشاشة الذكية بدون الحاجة لتشغيل بايثون على جهازك:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/9jfcc/TorrentX)
+
+1. اضغط على زر **Deploy to Render** أعلاه (أو سجل في [render.com](https://render.com) مجاناً بحساب GitHub).
+2. اضغط **Apply / Create Web Service**.
+3. ستحصل خلال دقيقة على رابط دائم مجاني مثل: `https://torrentx-addon.onrender.com/configure` لتثبيت الإضافة في Harbor أو Stremio من أي جهاز بالعالم!
+
+---
+
 ## 🚀 التثبيت السريع (Quick Installation)
 
 ### 1. عبر PowerShell (ويندوز)

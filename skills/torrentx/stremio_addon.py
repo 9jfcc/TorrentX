@@ -25,7 +25,7 @@ if SKILL_DIR not in sys.path:
 import debrid_manager
 import subtitle_manager
 
-PORT = int(os.environ.get("TORRENTX_ADDON_PORT", "7123"))
+PORT = int(os.environ.get("PORT") or os.environ.get("TORRENTX_ADDON_PORT", "7123"))
 SUB_CACHE = {}          # token -> {"bytes": b"...", "ts": float}
 STREAM_META_CACHE = {}  # media_id -> {"ts": float, "items": [{"title", "release_type", "url"}]}
 
@@ -384,16 +384,27 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
     subsource_key = (url_cfg or {}).get("subsource_key") or None
     wyzie_key = (url_cfg or {}).get("wyzie_key") or None
 
+    target_lang = (url_cfg or {}).get("sub_lang") or "ar"
+    stremio_lang = "ara" if target_lang == "ar" else ("eng" if target_lang == "en" else target_lang)
+
     subs = []
     try:
         res = subtitle_manager.search_all_subtitles(
-            query_title, imdb_id=imdb_id, lang="ar", release_type=release_type,
+            query_title, imdb_id=imdb_id, lang=target_lang, release_type=release_type,
             season=season, episode=episode,
             subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
         )
         candidates = res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
     except Exception:
         candidates = []
+
+    if target_lang == "ar":
+        clean_cand = []
+        for c in candidates:
+            c_lang = str(c.get("language") or c.get("lang") or "").lower()
+            if c_lang in ("ar", "ara", "arabic", ""):
+                clean_cand.append(c)
+        candidates = clean_cand
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for idx, c in enumerate(candidates[:6]):
@@ -428,7 +439,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
                 label = " • ".join(label_parts) if label_parts else f"Arabic #{idx+1}"
                 subs.append({
                     "id": f"tx-{token}",
-                    "lang": "ara",
+                    "lang": stremio_lang,
                     "url": f"{host_base}/sub_dl/{token}.srt",
                     "SubEncoding": "UTF-8",
                     "label": f"[TorrentX{sync_tag}] {label}",
@@ -522,8 +533,18 @@ CONFIGURE_HTML = """<!DOCTYPE html>
       <a class="btn-api" href="https://sub.wyzie.io/redeem" target="_blank" rel="noopener">🔑 جلب من Wyzie</a>
     </div>
 
+    <h3>4. لغة الترجمة (Subtitle Language)</h3>
+    <label>لغة الترجمات المستهدفة</label>
+    <select id="subLang">
+      <option value="ar" selected>🇸🇦 العربية فقط (Arabic Only) — SubSource + SubDL (موصى به)</option>
+      <option value="en">🇺🇸 الإنجليزية فقط (English Only)</option>
+      <option value="all">🌐 كل اللغات المتاحة (All Languages)</option>
+    </select>
+
     <div class="note">
-      ⚠️ <b>ملاحظة لمستخدمي Harbor:</b> يفعل برنامج Harbor افتراضياً خيار <b>صارم</b> في فلتر أمان البث، وقد يحجب الأفلام الحديثة خلف زر "بحث أوسع". لتجنب ذلك، ادخل: <b>الإعدادات ← المصادر والمكتبة ← تفضيلات المصادر ← فلتر أمان البث</b> واختر <b>متوازن</b> (أو <b>إيقاف</b>) بدلاً من <b>صارم</b>.
+      ⚠️ <b>ملاحظات هامة لمستخدمي Harbor:</b><br>
+      • <b>لتفادي حجب المصادر:</b> ادخل: <b>الإعدادات ← المصادر والمكتبة ← تفضيلات المصادر ← فلتر أمان البث</b> واختر <b>متوازن</b> (أو <b>إيقاف</b>) بدلاً من <b>صارم</b>.<br>
+      • <b>لإظهار الترجمة العربية تلقائياً في المشغل:</b> ادخل <b>الإعدادات ← اللغات (Languages)</b> وتأكد من اختيار <b>العربية (Arabic)</b> كلغة ترجمة مفضلة حتى يفتح المشغل الترجمات العربية فوراً ولا يحصرها في الإنجليزية المدمجة.
     </div>
 
     <button onclick="gen()">إنشاء رابط التثبيت</button>
@@ -555,6 +576,7 @@ function gen() {
     service: document.getElementById('service').value,
     api_key: document.getElementById('apikey').value.trim(),
     allow_upscale: document.getElementById('allowUpscale').value === 'true',
+    sub_lang: document.getElementById('subLang').value,
     subdl_key: document.getElementById('subdlKey').value.trim(),
     subsource_key: document.getElementById('subsourceKey').value.trim(),
     wyzie_key: document.getElementById('wyzieKey').value.trim()
@@ -691,8 +713,8 @@ class AddonHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), AddonHandler)
-    print(f"TorrentX Stremio/Harbor/Nuvio Addon running at http://127.0.0.1:{PORT}/manifest.json")
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), AddonHandler)
+    print(f"TorrentX Stremio/Harbor/Nuvio Addon running at http://0.0.0.0:{PORT}/manifest.json")
     print(f"Configure page: http://127.0.0.1:{PORT}/configure")
     try:
         server.serve_forever()
