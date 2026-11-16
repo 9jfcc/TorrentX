@@ -588,9 +588,12 @@ def select_best_movie_release(streams, allow_upscale=False):
 
     pool = filtered if filtered else parsed
 
-    # Classify into the 5 Strict Priority Tiers
+    # Classify into the 5 Strict Priority Tiers (episode-aware size thresholds)
     for c in pool:
         comb = c["comb"]
+        is_ep = bool(re.search(r"\b(s\d{1,2}e\d{1,2}|\d{1,2}x\d{2}|e\d{2,3})\b", comb))
+        min_4k_web = 1.5 if is_ep else 6.0
+        min_1080_web = 0.6 if is_ep else 2.5
         if c["res"] == "4K" and c["is_remux"]:
             tier = 1
             tier_label = "4K UHD BluRay Remux (خام أصلي بدون ضغط)"
@@ -599,11 +602,11 @@ def select_best_movie_release(streams, allow_upscale=False):
             tier = 2
             tier_label = "1080p BluRay Remux (بلوراي خام أصلي بدون ضغط)"
             release_type = "bluray"
-        elif c["res"] == "4K" and c["is_webdl"] and not c["is_low_encode"] and c["size_gb"] >= 8.0:
+        elif c["res"] == "4K" and c["is_webdl"] and not c["is_low_encode"] and (c["size_gb"] >= min_4k_web or c["has_stream_tag"]):
             tier = 3
             tier_label = "4K UHD WEB-DL (نسخة رقمية خام بدون ضغط)"
             release_type = "web"
-        elif c["res"] == "1080p" and c["is_webdl"] and not c["is_low_encode"] and c["size_gb"] >= 3.0:
+        elif c["res"] == "1080p" and c["is_webdl"] and not c["is_low_encode"] and (c["size_gb"] >= min_1080_web or c["has_stream_tag"]):
             tier = 4
             tier_label = "1080p FHD WEB-DL (نسخة رقمية خام بدون ضغط)"
             release_type = "web"

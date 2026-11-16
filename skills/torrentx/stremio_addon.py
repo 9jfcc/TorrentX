@@ -104,7 +104,59 @@ def fetch_torrentio_streams(media_type, media_id, svc_id, api_key):
         return []
 
 
-def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False):
+def _format_clean_stream_title(c, media_type="movie"):
+    """Builds a short, clean stream title: Name • Res Quality • Group + Size • ~Bitrate • Arabic Sub."""
+    import re
+    raw_name = os.path.basename(c.get("title") or "Stream").strip()
+    stem = re.sub(r"\.(mkv|mp4|avi|ts|m2ts)$", "", raw_name, flags=re.I)
+
+    # Extract release group (-GROUP or .by.GROUP)
+    grp_m = re.search(r"(?:-([A-Za-z0-9_]+)|\.by\.([A-Za-z0-9_]+))$", stem, re.I)
+    group = (grp_m.group(1) or grp_m.group(2)) if grp_m else ""
+
+    # Extract clean work name (up to year or SxxExx)
+    ep_m = re.search(r"\b(S\d{1,2}E\d{1,2}|\d{1,2}x\d{2})\b", stem, re.I)
+    yr_m = re.search(r"\b(19\d{2}|20\d{2})\b", stem)
+    cut_idx = len(stem)
+    if ep_m:
+        cut_idx = ep_m.end()
+    elif yr_m:
+        cut_idx = yr_m.end()
+    else:
+        q_m = re.search(r"\b(2160p|1080p|720p|4k|uhd|remux|web-dl|webdl|bluray|blu-ray)\b", stem, re.I)
+        if q_m:
+            cut_idx = q_m.start()
+    short_name = re.sub(r"[._]+", " ", stem[:cut_idx]).strip(" -.") or stem[:40]
+
+    res = c.get("res") or "1080p"
+    if c.get("is_remux"):
+        qual = "Remux"
+    elif c.get("is_webdl"):
+        qual = "WEB-DL"
+    elif c.get("is_webrip"):
+        qual = "WEBRip"
+    elif "bluray" in c.get("comb", "") or "blu-ray" in c.get("comb", ""):
+        qual = "BluRay"
+    else:
+        qual = "Encode"
+
+    line1_parts = [short_name, f"{res} {qual}"]
+    if group:
+        line1_parts.append(group)
+    line1 = " • ".join(line1_parts)
+
+    size_gb = c.get("size_gb") or 0.0
+    size_str = f"💾 {size_gb:.1f} GB" if size_gb > 0 else "💾 ?"
+    dur_sec = 2700 if (media_type == "series" or ep_m) else 7200
+    est_mbps = round((size_gb * 8192) / dur_sec, 1) if size_gb > 0 else 0
+    bitrate_str = f"⚡ ~{est_mbps} Mbps" if est_mbps > 0 else ""
+    ar_str = "🇸🇦 عربي مدمج" if c.get("has_arabic_flag") else "🌐 بدون علامة عربي"
+
+    line2_parts = [p for p in [size_str, bitrate_str, ar_str] if p]
+    return f"{line1}\n{' | '.join(line2_parts)}"
+
+
+def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False, media_type="movie"):
     """Filters, ranks by Tier (Best -> Worst), and formats into Stremio stream objects."""
     if not raw_streams:
         return []
@@ -127,7 +179,6 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
     for c in candidates[:25]:
         tier = c["tier"]
         res = c["res"]
-        size_str = f"{c['size_gb']:.1f} GB" if c["size_gb"] > 0 else "?"
         tier_short = {
             1: "Tier 1 • 4K Remux",
             2: "Tier 2 • 1080p Remux",
@@ -143,7 +194,7 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
 
         stream_obj = {
             "name": f"TorrentX\n{tier_short}\n{badge}",
-            "title": f"{c['title']}\n💾 {size_str} | {c['tier_label']}",
+            "title": _format_clean_stream_title(c, media_type=media_type),
             "behaviorHints": {
                 "bingeGroup": f"torrentx-tier-{tier}",
                 "filename": c["title"],
@@ -599,7 +650,7 @@ class AddonHandler(BaseHTTPRequestHandler):
             media_id = parts[2][:-5]
             allow_upscale = bool((url_cfg or {}).get("allow_upscale", False))
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
-            streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale)
+            streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale, media_type=media_type)
             return self._send_json({"streams": streams})
 
         if len(parts) == 3 and parts[0] == "subtitles" and parts[2].endswith(".json"):
