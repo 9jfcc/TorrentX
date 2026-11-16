@@ -73,7 +73,18 @@ if (-not $ariaPath) {
 }
 
 Write-Host "`n===================================================================" -ForegroundColor Green
-Write-Host "  [SUCCESS] TorrentX installed successfully in Google Antigravity!  " -ForegroundColor Green
+Write-Host "  [SUCCESS] TorrentX installed successfully!  " -ForegroundColor Green
 Write-Host "===================================================================" -ForegroundColor Green
 
-Write-Host "`n[*] Next step: add your TorBox API key to $env:USERPROFILE\.gemini\config\debrid.json" -ForegroundColor Cyan
+# Auto-start Addon Server & open configure in browser
+Write-Host "`n[*] Starting TorrentX Addon Server..." -ForegroundColor Yellow
+$addonScript = Join-Path $targetDir "stremio_addon.py"
+if (Test-Path $addonScript) {
+    Start-Process -FilePath "pythonw.exe" -ArgumentList "`"$addonScript`"" -WorkingDirectory $targetDir
+    Start-Sleep -Seconds 1
+    Start-Process "http://127.0.0.1:7123/configure"
+    Write-Host "[+] Opened Addon configuration in your browser: http://127.0.0.1:7123/configure" -ForegroundColor Green
+}
+
+Write-Host "`n[*] You can also start the addon anytime by running TorrentX-Addon.bat or:" -ForegroundColor Cyan
+Write-Host "    python $addonScript" -ForegroundColor DarkGray
