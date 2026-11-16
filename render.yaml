@@ -1,7 +1,9 @@
 services:
   - type: web
     name: torrentx-addon
-    env: docker
-    dockerfilePath: Dockerfile
+    runtime: python
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python skills/torrentx/stremio_addon.py
     healthCheckPath: /manifest.json
+    autoDeploy: true
