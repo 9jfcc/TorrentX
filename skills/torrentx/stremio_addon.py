@@ -26,7 +26,8 @@ import debrid_manager
 import subtitle_manager
 
 PORT = int(os.environ.get("TORRENTX_ADDON_PORT", "7123"))
-SUB_CACHE = {}  # token -> {"bytes": b"...", "ts": float}
+SUB_CACHE = {}          # token -> {"bytes": b"...", "ts": float}
+STREAM_META_CACHE = {}  # media_id -> {"ts": float, "items": [{"title", "release_type", "url"}]}
 
 
 def build_manifest(mode_label="Auto"):
@@ -103,18 +104,24 @@ def fetch_torrentio_streams(media_type, media_id, svc_id, api_key):
         return []
 
 
-def format_streams(raw_streams, mode, svc_id):
+def format_streams(raw_streams, mode, svc_id, media_id=None):
     """Filters, ranks by Tier (Best -> Worst), and formats into Stremio stream objects."""
     if not raw_streams:
         return []
 
-    # Reuse debrid_manager's strict anti-upscale & security filter
-    best, _ = debrid_manager.select_best_movie_release(raw_streams)
-    # Re-run full pool ranking by calling internal logic cleanly:
-    # select_best_movie_release returns top 6; let's rank all eligible candidates up to 25
-    # by temporarily inspecting all parsed candidates via a clean helper or using select_best_movie_release.
-    # Let's parse all raw_streams cleanly using the exact same rules:
     candidates = _rank_all_candidates(raw_streams, mode)
+    if media_id:
+        STREAM_META_CACHE[media_id] = {
+            "ts": time.time(),
+            "items": [
+                {
+                    "title": c.get("title", ""),
+                    "release_type": c.get("release_type"),
+                    "url": c.get("direct_url") or "",
+                }
+                for c in candidates
+            ],
+        }
 
     out = []
     for c in candidates[:25]:
@@ -196,18 +203,116 @@ def _rank_all_candidates(raw_streams, mode):
     return ranked
 
 
-def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None):
-    """Fetches Arabic subtitles from SubSource + SubDL only and serves them via /sub_dl/<token>.srt."""
+def _extract_first_2min_ref_timestamps(media_url, timeout=8):
+    """Reads ONLY the first ~2.5 minutes of embedded subtitle PTS timestamps from an HTTP CDN URL."""
+    import shutil
+    import subprocess
+    if not media_url or not media_url.startswith("http"):
+        return []
+    ffprobe = shutil.which("ffprobe") or os.path.expanduser(r"~\AppData\Local\Harbor\ffprobe.exe")
+    if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
+        return []
+    try:
+        cmd = [
+            ffprobe, "-v", "quiet", "-print_format", "json",
+            "-select_streams", "s:0", "-show_packets",
+            "-read_intervals", "%+150", media_url,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        if res.returncode != 0 or not res.stdout:
+            return []
+        pkts = json.loads(res.stdout).get("packets") or []
+        pts_list = []
+        for p in pkts:
+            t = p.get("pts_time")
+            if t is not None:
+                val = float(t)
+                if 1.0 <= val <= 155.0:
+                    pts_list.append(val)
+        # Deduplicate close timestamps (<0.3s)
+        clean = []
+        for val in sorted(pts_list):
+            if not clean or (val - clean[-1]) > 0.35:
+                clean.append(val)
+        return clean[:40]
+    except Exception:
+        return []
+
+
+def _parse_srt_first_cues(srt_text):
+    """Returns start timestamps (seconds) of the first 25 cues in an SRT string."""
+    import re
+    cues = []
+    for m in re.finditer(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->", srt_text):
+        h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        sec = h * 3600 + mn * 60 + s + ms / 1000.0
+        if 1.0 <= sec <= 155.0:
+            cues.append(sec)
+        if len(cues) >= 25:
+            break
+    return cues
+
+
+def _compute_fast_offset(ref_times, sub_times):
+    """Finds consistent constant offset (ref - sub) in seconds if within [-45s, +45s]."""
+    if len(ref_times) < 4 or len(sub_times) < 4:
+        return 0.0
+    # Pair first cue alignments and pick the offset with highest inlier consensus (+/- 0.6s)
+    best_offset = 0.0
+    best_hits = 0
+    for r0 in ref_times[:6]:
+        for s0 in sub_times[:6]:
+            cand = r0 - s0
+            if abs(cand) > 45.0:
+                continue
+            hits = sum(1 for st in sub_times if any(abs((st + cand) - rt) <= 0.6 for rt in ref_times))
+            if hits > best_hits:
+                best_hits = hits
+                best_offset = cand
+    if best_hits >= max(3, min(len(sub_times), 6) // 2) and abs(best_offset) >= 0.25:
+        return round(best_offset, 3)
+    return 0.0
+
+
+def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None):
+    """Fetches Arabic subtitles (SubSource + SubDL) matched by release_type + fast 2-min CDN offset sync."""
     import tempfile
     now = time.time()
-    expired = [k for k, v in SUB_CACHE.items() if now - v["ts"] > 7200]
-    for k in expired:
+    for k in [k for k, v in SUB_CACHE.items() if now - v["ts"] > 7200]:
         SUB_CACHE.pop(k, None)
+
+    # 1. Match stream metadata (release_type + CDN URL) from STREAM_META_CACHE
+    release_type = None
+    cdn_url = None
+    meta_entry = STREAM_META_CACHE.get(full_media_id or imdb_id) or STREAM_META_CACHE.get(imdb_id)
+    if meta_entry and meta_entry.get("items"):
+        items = meta_entry["items"]
+        chosen = items[0]
+        if filename:
+            fn_low = filename.lower()
+            for it in items:
+                if it.get("title", "").lower() == fn_low or fn_low in it.get("title", "").lower():
+                    chosen = it
+                    break
+        release_type = chosen.get("release_type")
+        cdn_url = chosen.get("url")
+
+    # 2. Extract first ~2.5 min reference timestamps from CDN URL (if available)
+    ref_times = _extract_first_2min_ref_timestamps(cdn_url) if cdn_url else []
+
+    # 3. Resolve canonical movie title for better SubDL/SubSource matching
+    query_title = imdb_id
+    try:
+        _, canonical_title, _ = debrid_manager.resolve_movie_identity(imdb_id)
+        if canonical_title:
+            query_title = canonical_title
+    except Exception:
+        pass
 
     subs = []
     try:
         res = subtitle_manager.search_all_subtitles(
-            imdb_id, imdb_id=imdb_id, lang="ar", season=season, episode=episode
+            query_title, imdb_id=imdb_id, lang="ar", release_type=release_type, season=season, episode=episode
         )
         candidates = res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
     except Exception:
@@ -223,6 +328,15 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None):
                     continue
                 with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
                     text = subtitle_manager.clean_subtitle_ads(f.read())
+
+                sync_tag = ""
+                if ref_times and hasattr(subtitle_manager, "shift_subtitle_timestamps"):
+                    sub_times = _parse_srt_first_cues(text)
+                    offset = _compute_fast_offset(ref_times, sub_times)
+                    if offset != 0.0:
+                        text = subtitle_manager.shift_subtitle_timestamps(text, offset)
+                        sync_tag = f" [Synced {offset:+.1f}s]"
+
                 SUB_CACHE[token] = {"bytes": text.encode("utf-8"), "ts": now}
                 label = c.get("release_name") or c.get("source") or f"Arabic #{idx+1}"
                 subs.append({
@@ -230,7 +344,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None):
                     "lang": "ara",
                     "url": f"{host_base}/sub_dl/{token}.srt",
                     "SubEncoding": "UTF-8",
-                    "label": f"[TorrentX] {label}",
+                    "label": f"[TorrentX{sync_tag}] {label}",
                 })
             except Exception:
                 continue
@@ -359,18 +473,22 @@ class AddonHandler(BaseHTTPRequestHandler):
             media_type = parts[1]
             media_id = parts[2][:-5]
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
-            streams = format_streams(raw, mode, svc_id)
+            streams = format_streams(raw, mode, svc_id, media_id=media_id)
             return self._send_json({"streams": streams})
 
         if len(parts) == 3 and parts[0] == "subtitles" and parts[2].endswith(".json"):
             media_type = parts[1]
             media_id = parts[2][:-5]
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            filename = (qs.get("filename") or [None])[0]
             id_parts = media_id.split(":")
             imdb_id = id_parts[0]
             season = int(id_parts[1]) if len(id_parts) > 1 and id_parts[1].isdigit() else None
             episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
             host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
-            subs = fetch_subtitles_for_stremio(imdb_id, host_base, season=season, episode=episode)
+            subs = fetch_subtitles_for_stremio(
+                imdb_id, host_base, season=season, episode=episode, filename=filename, full_media_id=media_id
+            )
             return self._send_json({"subtitles": subs})
 
         return self._send_json({"error": "Not found"}, status=404)
