@@ -19,3 +19,6 @@ debrid.json
 subtitles.json
 tracked_series.json
 node_modules/
+
+build/
+*.spec

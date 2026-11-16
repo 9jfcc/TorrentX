@@ -9,14 +9,21 @@ TorrentX Stremio / Harbor / Nuvio Addon Server
 - Subtitles: Fetches Arabic subtitles exclusively from SubSource & SubDL (Official Platforms + Top Translators).
 """
 import os
+import re
 import sys
 import json
 import time
 import uuid
 import base64
+import logging
+import threading
+import subprocess
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("TorrentX")
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if SKILL_DIR not in sys.path:
@@ -26,20 +33,27 @@ import debrid_manager
 import subtitle_manager
 
 PORT = int(os.environ.get("PORT") or os.environ.get("TORRENTX_ADDON_PORT", "7123"))
-SUB_CACHE = {}          # token -> {"bytes": b"...", "ts": float}
+SUB_CACHE = {}  # token -> {"bytes": b"...", "ts": float, "candidate": dict, "ref_times": list}
 STREAM_META_CACHE = {}  # media_id -> {"ts": float, "items": [{"title", "release_type", "url"}]}
 
 
 def build_manifest(mode_label="Auto"):
     return {
         "id": "com.9jfcc.torrentx.addon",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "name": f"TorrentX ({mode_label})",
         "description": (
             "Strict 4-Tier Anti-Upscale Movie/Series Streams (Cached-Only for Debrid, "
             "High-Seeder Only for P2P) + Exclusive SubSource/SubDL Arabic Subtitles."
         ),
-        "resources": ["stream", "subtitles"],
+        "resources": [
+            "stream",
+            {
+                "name": "subtitles",
+                "types": ["movie", "series"],
+                "idPrefixes": ["tt"],
+            },
+        ],
         "types": ["movie", "series"],
         "idPrefixes": ["tt"],
         "catalogs": [],
@@ -52,7 +66,7 @@ def build_manifest(mode_label="Auto"):
 
 def parse_config_segment(seg):
     """Decodes optional base64 JSON config segment from Stremio addon URL."""
-    if not seg:
+    if not seg or seg in ("manifest.json", "stream", "subtitles", "configure", "sub_dl", "install_harbor", "open_harbor"):
         return None
     try:
         padded = seg + "=" * (-len(seg) % 4)
@@ -100,21 +114,18 @@ def fetch_torrentio_streams(media_type, media_id, svc_id, api_key):
             for s in streams:
                 s["_debrid_service"] = svc_id
             return streams
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed fetching torrentio streams: %s", e)
         return []
 
 
 def _format_clean_stream_title(c, media_type="movie"):
     """Builds a short, clean stream title: Name • Res Quality • Group + Size • ~Bitrate • Arabic Sub."""
-    import re
     raw_name = os.path.basename(c.get("title") or "Stream").strip()
     stem = re.sub(r"\.(mkv|mp4|avi|ts|m2ts)$", "", raw_name, flags=re.I)
-
-    # Extract release group (-GROUP or .by.GROUP)
     grp_m = re.search(r"(?:-([A-Za-z0-9_]+)|\.by\.([A-Za-z0-9_]+))$", stem, re.I)
     group = (grp_m.group(1) or grp_m.group(2)) if grp_m else ""
 
-    # Extract clean work name (up to year or SxxExx)
     ep_m = re.search(r"\b(S\d{1,2}E\d{1,2}|\d{1,2}x\d{2})\b", stem, re.I)
     yr_m = re.search(r"\b(19\d{2}|20\d{2})\b", stem)
     cut_idx = len(stem)
@@ -126,6 +137,7 @@ def _format_clean_stream_title(c, media_type="movie"):
         q_m = re.search(r"\b(2160p|1080p|720p|4k|uhd|remux|web-dl|webdl|bluray|blu-ray)\b", stem, re.I)
         if q_m:
             cut_idx = q_m.start()
+
     short_name = re.sub(r"[._]+", " ", stem[:cut_idx]).strip(" -.") or stem[:40]
 
     res = c.get("res") or "1080p"
@@ -147,12 +159,14 @@ def _format_clean_stream_title(c, media_type="movie"):
 
     size_gb = c.get("size_gb") or 0.0
     size_str = f"💾 {size_gb:.1f} GB" if size_gb > 0 else "💾 ?"
+
     dur_sec = 2700 if (media_type == "series" or ep_m) else 7200
     est_mbps = round((size_gb * 8192) / dur_sec, 1) if size_gb > 0 else 0
     bitrate_str = f"⚡ ~{est_mbps} Mbps" if est_mbps > 0 else ""
-    ar_str = "🇸🇦 ترجمة عربية مدمجة" if c.get("has_arabic_flag") else "🌐 بدون ترجمة عربية"
 
+    ar_str = "🇸🇦 ترجمة عربية مدمجة" if c.get("has_arabic_flag") else "🌐 ترجمة خارجية تلقائية"
     line2_parts = [p for p in [size_str, bitrate_str, ar_str] if p]
+
     return f"{line1}\n{' | '.join(line2_parts)}"
 
 
@@ -192,9 +206,11 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
         else:
             badge = f"🌱 {c['seeders']} Seeders" + (" (Uncached)" if mode == "debrid" else "")
 
+        clean_title = _format_clean_stream_title(c, media_type=media_type)
         stream_obj = {
             "name": f"TorrentX\n{tier_short}\n{badge}",
-            "title": _format_clean_stream_title(c, media_type=media_type),
+            "title": clean_title,
+            "description": clean_title,
             "behaviorHints": {
                 "bingeGroup": f"torrentx-tier-{tier}",
                 "filename": c["title"],
@@ -206,6 +222,7 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
             stream_obj["infoHash"] = c["hash"]
         else:
             continue
+
         out.append(stream_obj)
     return out
 
@@ -235,6 +252,7 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
                 ranked_cached.append(item)
             if item.get("seeders", 0) > 0:
                 ranked_p2p.append(item)
+
         remaining = [
             s for s in remaining
             if (s.get("infoHash") or s.get("url") or s.get("title")) not in seen
@@ -246,7 +264,6 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
         ranked_cached.sort(key=lambda x: (x["tier"], -x.get("q_score", 0)))
         return ranked_cached
 
-    # P2P mode OR Debrid fallback when 0 cached torrents exist on the server
     ranked_p2p.sort(key=lambda x: (x["tier"], -x.get("seeders", 0), -x.get("q_score", 0)))
     return ranked_p2p
 
@@ -254,14 +271,14 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
 def _extract_first_2min_ref_timestamps(media_url, timeout=3):
     """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
-    import subprocess
     if not media_url or not media_url.startswith("http"):
         return []
+
     ffprobe = shutil.which("ffprobe") or os.path.expanduser(r"~\AppData\Local\Harbor\ffprobe.exe")
     if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
         return []
+
     try:
-        # Step A: Pick best non-forced English (or first) subtitle stream index quickly
         stream_sel = "s:0"
         probe_s = subprocess.run(
             [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", media_url],
@@ -280,12 +297,14 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=3):
 
         cmd = [
             ffprobe, "-v", "quiet", "-print_format", "json",
-            "-select_streams", stream_sel, "-show_packets",
-            "-read_intervals", "%+180", media_url,
+            "-select_streams", stream_sel,
+            "-show_packets", "-read_intervals", "%+180",
+            media_url,
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         if res.returncode != 0 or not res.stdout:
             return []
+
         pkts = json.loads(res.stdout).get("packets") or []
         pts_list = []
         for p in pkts:
@@ -294,6 +313,7 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=3):
                 val = float(t)
                 if 1.0 <= val <= 185.0:
                     pts_list.append(val)
+
         clean = []
         for val in sorted(pts_list):
             if not clean or (val - clean[-1]) > 0.35:
@@ -305,7 +325,6 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=3):
 
 def _parse_srt_first_cues(srt_text):
     """Returns start timestamps (seconds) of the first 35 cues in an SRT string."""
-    import re
     cues = []
     for m in re.finditer(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->", srt_text):
         h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
@@ -330,7 +349,6 @@ def _compute_fast_offset(ref_times, sub_times):
                 continue
             inliers = []
             for st in sub_times:
-                # Find closest ref timestamp to (st + cand)
                 closest = min(ref_times, key=lambda rt: abs((st + cand) - rt))
                 if abs((st + cand) - closest) <= 0.45:
                     inliers.append(closest - st)
@@ -373,7 +391,8 @@ def _resolve_and_cache_sub(token):
                 if offset != 0.0:
                     text = subtitle_manager.shift_subtitle_timestamps(text, offset)
 
-            b = text.encode("utf-8")
+            # UTF-8 with BOM helps MPV/Windows players detect Arabic encoding reliably
+            b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
             item["bytes"] = b
             return b
     except Exception as e:
@@ -382,71 +401,84 @@ def _resolve_and_cache_sub(token):
 
 
 def _inject_harbor_addon(manifest_url, mode_label="TorrentX", url_cfg=None):
+    """Safely updates Harbor configuration files while Harbor is closed."""
     try:
-        user_data_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\user-data.json")
-        secrets_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\secrets.json")
-        settings_path = os.path.expanduser(r"~\AppData\Roaming\app.harbor\settings.json")
-        import json
+        if url_cfg is None and manifest_url:
+            path_parts = [p for p in urllib.parse.urlparse(manifest_url).path.strip("/").split("/") if p]
+            if path_parts:
+                url_cfg = parse_config_segment(path_parts[0])
 
-        # Update secrets.json with SubSource and SubDL keys
+        if url_cfg:
+            mode, svc_id, _ = resolve_runtime_debrid(url_cfg)
+            mode_label = f"{svc_id.upper()} Cached" if mode == "debrid" else "P2P Seeders"
+
+        app_dir = os.path.expanduser(r"~\AppData\Roaming\app.harbor")
+        user_data_path = os.path.join(app_dir, "user-data.json")
+        secrets_path = os.path.join(app_dir, "secrets.json")
+        settings_path = os.path.join(app_dir, "settings.json")
+
+        # 1. Update secrets.json with SubSource, SubDL, and Debrid keys
         if os.path.exists(secrets_path):
             try:
                 with open(secrets_path, "r", encoding="utf-8") as sf:
                     s_data = json.load(sf)
-                inner = json.loads(s_data.get("harbor.settings-secrets.v1.shared", "{}"))
-                if url_cfg and url_cfg.get("subsource_key"):
-                    inner["subsourceApiKey"] = url_cfg["subsource_key"]
-                if url_cfg and url_cfg.get("subdl_key"):
-                    inner["subdlApiKey"] = url_cfg["subdl_key"]
-                if url_cfg and url_cfg.get("api_key") and (url_cfg.get("service") == "torbox"):
-                    inner["tbKey"] = url_cfg["api_key"]
-                s_data["harbor.settings-secrets.v1.shared"] = json.dumps(inner)
+                raw_inner = s_data.get("harbor.settings-secrets.v1.shared", "{}")
+                inner = json.loads(raw_inner) if isinstance(raw_inner, str) else (raw_inner or {})
+                if url_cfg:
+                    if url_cfg.get("subsource_key"):
+                        inner["subsourceApiKey"] = url_cfg["subsource_key"]
+                    if url_cfg.get("subdl_key"):
+                        inner["subdlApiKey"] = url_cfg["subdl_key"]
+                    if url_cfg.get("api_key") and url_cfg.get("service") == "torbox":
+                        inner["tbKey"] = url_cfg["api_key"]
+                s_data["harbor.settings-secrets.v1.shared"] = json.dumps(inner, ensure_ascii=False)
                 with open(secrets_path, "w", encoding="utf-8") as sf:
                     json.dump(s_data, sf, ensure_ascii=False)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Could not update secrets.json: %s", e)
 
-        # Update settings.json to enable sub providers
+        # 2. Update settings.json to enable addon subtitles and Arabic preference
         if os.path.exists(settings_path):
             try:
                 with open(settings_path, "r", encoding="utf-8") as stf:
                     st_data = json.load(stf)
-                sp = st_data.get("subProvidersEnabled", {})
+                sp = st_data.get("subProvidersEnabled") or {}
                 sp["subsource"] = True
                 sp["subdl"] = True
                 sp["addons"] = True
                 st_data["subProvidersEnabled"] = sp
-                st_data["preferredSubLangs"] = ["Arabic"]
+                st_data["preferredSubLangs"] = ["Arabic", "ara", "ar"]
                 with open(settings_path, "w", encoding="utf-8") as stf:
                     json.dump(st_data, stf, ensure_ascii=False)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Could not update settings.json: %s", e)
+
+        # 3. Update user-data.json with latest manifest (including subtitles resource)
         if not os.path.exists(user_data_path):
             return False
-        import json
         with open(user_data_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-
-        target_key = None
-        for k in data:
-            if "installed-addons" in k:
-                target_key = k
-                break
-        if not target_key:
-            return False
-
-        raw_addons = data.get(target_key, "[]")
-        addons_list = json.loads(raw_addons) if isinstance(raw_addons, str) else (raw_addons or [])
-        addons_list = [a for a in addons_list if a.get("id") != "com.9jfcc.torrentx.addon"]
 
         new_entry = {
             "id": "com.9jfcc.torrentx.addon",
             "transportUrl": manifest_url,
             "installedAt": int(time.time() * 1000),
-            "manifest": build_manifest(mode_label)
+            "enabled": True,
+            "manifest": build_manifest(mode_label),
         }
-        addons_list.append(new_entry)
-        data[target_key] = json.dumps(addons_list)
+
+        updated_any = False
+        for k in list(data.keys()):
+            if "installed-addons" in k:
+                raw_addons = data.get(k, "[]")
+                addons_list = json.loads(raw_addons) if isinstance(raw_addons, str) else (raw_addons or [])
+                addons_list = [a for a in addons_list if a.get("id") != "com.9jfcc.torrentx.addon"]
+                addons_list.append(new_entry)
+                data[k] = json.dumps(addons_list, ensure_ascii=False) if isinstance(raw_addons, str) else addons_list
+                updated_any = True
+
+        if not updated_any:
+            data["harbor.installed-addons.v1.shared"] = json.dumps([new_entry], ensure_ascii=False)
 
         with open(user_data_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
@@ -456,13 +488,12 @@ def _inject_harbor_addon(manifest_url, mode_label="TorrentX", url_cfg=None):
         return False
 
 
-def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None, url_cfg=None):
-    """Ultra-fast Arabic subtitle search (SubSource + SubDL + Wyzie) with on-demand streaming."""
+def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None, url_cfg=None, fast_mode=False):
+    """Arabic subtitle search (SubSource + SubDL + Wyzie) with on-demand streaming."""
     now = time.time()
-    for k in [k for k, v in SUB_CACHE.items() if now - v.get("ts", 0) > 7200]:
+    for k in [k for k, v in list(SUB_CACHE.items()) if now - v.get("ts", 0) > 7200]:
         SUB_CACHE.pop(k, None)
 
-    # 1. Match stream metadata from STREAM_META_CACHE
     release_type = None
     cdn_url = None
     meta_entry = STREAM_META_CACHE.get(full_media_id or imdb_id) or STREAM_META_CACHE.get(imdb_id)
@@ -478,10 +509,9 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         release_type = chosen.get("release_type")
         cdn_url = chosen.get("url")
 
-    # 2. Extract reference timestamps if CDN URL available
-    ref_times = _extract_first_2min_ref_timestamps(cdn_url) if cdn_url else []
+    # Avoid blocking /stream/ requests with ffprobe network calls when fast_mode=True
+    ref_times = [] if fast_mode else (_extract_first_2min_ref_timestamps(cdn_url) if cdn_url else [])
 
-    # 3. Canonical title
     query_title = imdb_id
     try:
         _, canonical_title, _ = debrid_manager.resolve_movie_identity(imdb_id)
@@ -505,7 +535,8 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
             subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
         )
         candidates = res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
-    except Exception:
+    except Exception as e:
+        logger.warning("Subtitle search error for %s: %s", imdb_id, e)
         candidates = []
 
     if target_lang == "ar":
@@ -536,24 +567,27 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
             "candidate": c,
             "ref_times": ref_times,
             "bytes": None,
-            "ts": now
+            "ts": now,
         }
-        subs.append({
-            "id": f"tx-{token}",
-            "lang": stremio_lang,
-            "url": f"{host_base}/sub_dl/{token}.srt",
-            "SubEncoding": "UTF-8",
-            "label": f"[TorrentX] {label}",
-        })
+        sub_url = f"{host_base}/sub_dl/{token}.srt"
+        langs_to_emit = ["ara", "ar"] if stremio_lang == "ara" else [stremio_lang]
+        for l_code in langs_to_emit:
+            subs.append({
+                "id": f"tx-{token}-{l_code}",
+                "lang": l_code,
+                "url": sub_url,
+                "SubEncoding": "UTF-8",
+                "label": f"[TorrentX] {label}",
+            })
         if idx < 2:
             to_prefetch.append(token)
 
-    # Prefetch top 2 subtitles in daemon thread so the first choice is ready immediately
     def _do_prefetch():
         for tok in to_prefetch:
             _resolve_and_cache_sub(tok)
 
-    threading.Thread(target=_do_prefetch, daemon=True).start()
+    if to_prefetch:
+        threading.Thread(target=_do_prefetch, daemon=True).start()
     return subs
 
 
@@ -582,7 +616,7 @@ CONFIGURE_HTML = """<!DOCTYPE html>
   button:hover { background: #2563eb; }
   .out { margin-top: 20px; padding: 18px; background: #0f172a; border: 1px solid #334155; border-radius: 10px; word-break: break-all; display: none; }
   .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
-  .actions button, .actions a { margin-top: 0; flex: 1; min-width: 160px; padding: 12px; border-radius: 8px; text-align: center; text-decoration: none; font-weight: 700; font-size: 14px; }
+  .actions button, .actions a { margin-top: 0; flex: 1; min-width: 160px; padding: 12px; border-radius: 8px; text-align: center; text-decoration: none; font-weight: 700; font-size: 14px; cursor: pointer; }
   .btn-copy { background: #475569; color: #fff; }
   .btn-install { background: #8b5cf6; color: #fff; }
 </style>
@@ -651,8 +685,8 @@ CONFIGURE_HTML = """<!DOCTYPE html>
 
     <div class="note">
       ⚠️ <b>ملاحظات هامة لمستخدمي Harbor:</b><br>
-      • <b>لتفادي حجب المصادر:</b> ادخل: <b>الإعدادات ← المصادر والمكتبة ← تفضيلات المصادر ← فلتر أمان البث</b> واختر <b>متوازن</b> (أو <b>إيقاف</b>) بدلاً من <b>صارم</b>.<br>
-      • <b>لإظهار الترجمة العربية تلقائياً في المشغل:</b> ادخل <b>الإعدادات ← اللغات (Languages)</b> وتأكد من اختيار <b>العربية (Arabic)</b> كلغة ترجمة مفضلة حتى يفتح المشغل الترجمات العربية فوراً ولا يحصرها في الإنجليزية المدمجة.
+      • عند الضغط على <b>«⚡ التثبيت المباشر في Harbor»</b> سيقوم السيرفر بتحديث إعدادات Harbor وتفعيل الإضافة والترجمة العربية تلقائياً وإعادة تشغيل Harbor.<br>
+      • إذا أردت إضافة الرابط يدوياً من داخل Harbor (إضافة من رابط)، الصق رابط <b>http://127.0.0.1:...</b> المنسوخ مباشرةً <b>وليس</b> رابط <code>stremio://</code> لأن Harbor يحول <code>stremio://</code> إلى <code>https://</code> مما يفشل مع السيرفر المحلي.
     </div>
 
     <button onclick="gen()">إنشاء رابط التثبيت</button>
@@ -689,16 +723,15 @@ function gen() {
     subsource_key: document.getElementById('subsourceKey').value.trim(),
     wyzie_key: document.getElementById('wyzieKey').value.trim()
   };
-  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(cfg)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  lastUrl = window.location.origin + '/' + b64 + '/manifest.json';
-  const stremioUrl = lastUrl.replace(/^https?:\/\//, 'stremio://');
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(cfg)))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+  lastUrl = 'http://127.0.0.1:' + window.location.port + '/' + b64 + '/manifest.json';
   const el = document.getElementById('out');
   el.style.display = 'block';
-  el.innerHTML = '<b style="color:#93c5fd;font-size:15px;">رابط الإضافة المولد:</b>' +
+  el.innerHTML = '<b style="color:#93c5fd;font-size:15px;">رابط الإضافة المولد (HTTP):</b>' +
     '<div style="word-break:break-all;font-size:12px;color:#cbd5e1;background:#090d16;padding:12px;border-radius:8px;border:1px solid #334155;margin:10px 0;user-select:all;">' + lastUrl + '</div>' +
     '<div class="actions">' +
-    '<a id="installBtn" class="btn-install" href="' + stremioUrl + '" onclick="return smartInstall()">⚡ الفتح في البرنامج</a>' +
-    '<button type="button" class="btn-copy" onclick="copyLink()">📋 نسخ الرابط</button>' +
+    '<button type="button" class="btn-install" onclick="smartInstall()">⚡ التثبيت المباشر في Harbor</button>' +
+    '<button type="button" class="btn-copy" onclick="copyLink()">📋 نسخ رابط HTTP</button>' +
     '</div>' +
     '<p id="hint" style="margin-top:12px;font-size:14px;color:#38bdf8;display:none;"></p>';
 }
@@ -706,19 +739,24 @@ function copyLink() {
   navigator.clipboard.writeText(lastUrl);
   const h = document.getElementById('hint');
   h.style.display = 'block';
-  h.textContent = '✅ تم نسخ الرابط للحافظة!';
+  h.textContent = '✅ تم نسخ رابط HTTP للحافظة! يمكنك لصقه مباشرة في خانة (إضافة من رابط) داخل Harbor.';
 }
-function smartInstall() {
-  const stremioUrl = lastUrl.replace(/^https?:\/\//, 'stremio://');
-  try {
-    navigator.clipboard.writeText(lastUrl);
-  } catch(e) {}
-  fetch('/install_harbor?manifest=' + encodeURIComponent(lastUrl)).catch(() => {});
-  window.location.href = stremioUrl;
+async function smartInstall() {
   const h = document.getElementById('hint');
   h.style.display = 'block';
-  h.textContent = '🚀 جاري الفتح في البرنامج... تم نسخ الرابط أيضاً للحافظة احتياطياً.';
-  return false;
+  h.textContent = '⏳ جاري حقن الإضافة وتفعيل الترجمة في Harbor...';
+  try { await navigator.clipboard.writeText(lastUrl); } catch(e) {}
+  try {
+    const res = await fetch('/install_harbor?manifest=' + encodeURIComponent(lastUrl));
+    const data = await res.json();
+    if (data.ok) {
+      h.textContent = '✅ تم تثبيت الإضافة وتفعيل الترجمة العربية في Harbor بنجاح! وتم نسخ رابط HTTP للحافظة احتياطياً.';
+    } else {
+      h.textContent = '⚠️ تعذر الحقن التلقائي، تم نسخ رابط HTTP للحافظة — الصقه يدوياً داخل Harbor في نافذة (إضافة من رابط).';
+    }
+  } catch(e) {
+    h.textContent = '⚠️ تم نسخ رابط HTTP للحافظة — الصقه داخل Harbor في نافذة (إضافة من رابط).';
+  }
 }
 </script>
 </body>
@@ -730,65 +768,88 @@ class AddonHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send_json(self, obj, status=200):
+    def _send_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _send_json(self, obj, status=200, head_only=False):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "*")
+        self._send_cors_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
 
-    def _send_bytes(self, data, content_type="text/plain; charset=utf-8", status=200):
+    def _send_bytes(self, data, content_type="text/plain; charset=utf-8", status=200, head_only=False):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not head_only:
+            self.wfile.write(data)
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
+        self._send_cors_headers()
         self.end_headers()
 
+    def do_HEAD(self):
+        self._handle_request(head_only=True)
+
     def do_GET(self):
+        self._handle_request(head_only=False)
+
+    def _handle_request(self, head_only=False):
         try:
             with open(r"C:\Users\9jhp9\addon_requests.log", "a", encoding="utf-8") as _lf:
                 _lf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {self.command} {self.path}\n")
         except Exception:
             pass
-        path = urllib.parse.urlparse(self.path).path.strip("/")
+
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path.strip("/")
         parts = [urllib.parse.unquote(p) for p in path.split("/") if p]
 
         if not parts or parts == ["configure"]:
-            return self._send_bytes(CONFIGURE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return self._send_bytes(CONFIGURE_HTML.encode("utf-8"), "text/html; charset=utf-8", head_only=head_only)
 
         if parts == ["open_harbor"] or (len(parts) == 1 and parts[0].startswith("install_harbor")):
-            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            query = urllib.parse.parse_qs(parsed_url.query)
             m_url = (query.get("manifest") or [None])[0]
-            if m_url:
-                _inject_harbor_addon(m_url)
             harbor_exe = os.path.expanduser(r"~\AppData\Local\Harbor\harbor.exe")
+
+            # Close Harbor briefly so it doesn't overwrite user-data.json while we inject the addon
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "harbor.exe"], capture_output=True, timeout=3)
+                time.sleep(0.4)
+            except Exception:
+                pass
+
+            injected = False
+            if m_url:
+                injected = _inject_harbor_addon(m_url)
+
             if os.path.exists(harbor_exe):
                 os.startfile(harbor_exe)
-                return self._send_json({"ok": True})
-            return self._send_json({"ok": False, "error": "Harbor not found"}, status=404)
+                return self._send_json({"ok": True, "injected": injected}, head_only=head_only)
+            return self._send_json({"ok": injected, "error": "Harbor executable not found"}, status=200, head_only=head_only)
 
         if parts[0] == "sub_dl" and len(parts) == 2:
             token = parts[1].replace(".srt", "")
             item = SUB_CACHE.get(token)
             if not item:
-                return self._send_bytes(b"", status=404)
+                return self._send_bytes(b"", status=404, head_only=head_only)
             data = item.get("bytes")
             if not data:
                 data = _resolve_and_cache_sub(token)
             if not data:
-                return self._send_bytes(b"", status=404)
-            return self._send_bytes(data, "application/x-subrip; charset=utf-8")
+                return self._send_bytes(b"", status=404, head_only=head_only)
+            return self._send_bytes(data, "application/x-subrip; charset=utf-8", head_only=head_only)
 
         # Optional config segment at parts[0]
         url_cfg = parse_config_segment(parts[0])
@@ -799,7 +860,10 @@ class AddonHandler(BaseHTTPRequestHandler):
         mode_label = f"{svc_id.upper()} Cached" if mode == "debrid" else "P2P Seeders"
 
         if parts == ["manifest.json"]:
-            return self._send_json(build_manifest(mode_label))
+            return self._send_json(build_manifest(mode_label), head_only=head_only)
+
+        if len(parts) == 2 and parts[1] == "configure":
+            return self._send_bytes(CONFIGURE_HTML.encode("utf-8"), "text/html; charset=utf-8", head_only=head_only)
 
         if len(parts) == 3 and parts[0] == "stream" and parts[2].endswith(".json"):
             media_type = parts[1]
@@ -808,7 +872,7 @@ class AddonHandler(BaseHTTPRequestHandler):
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
             streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale, media_type=media_type)
 
-            # Attach Arabic subtitles directly inside stream objects
+            # Attach Arabic subtitles directly inside stream objects (fast_mode=True avoids ffprobe delay)
             try:
                 host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
                 id_parts = media_id.split(":")
@@ -816,7 +880,7 @@ class AddonHandler(BaseHTTPRequestHandler):
                 season = int(id_parts[1]) if len(id_parts) > 1 and id_parts[1].isdigit() else None
                 episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
                 subs = fetch_subtitles_for_stremio(
-                    imdb_id, host_base, season=season, episode=episode, full_media_id=media_id, url_cfg=url_cfg
+                    imdb_id, host_base, season=season, episode=episode, full_media_id=media_id, url_cfg=url_cfg, fast_mode=True
                 )
                 if subs:
                     for s in streams:
@@ -824,7 +888,7 @@ class AddonHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.warning("Error attaching subs to streams: %s", e)
 
-            return self._send_json({"streams": streams})
+            return self._send_json({"streams": streams}, head_only=head_only)
 
         if len(parts) >= 3 and parts[0] == "subtitles":
             media_type = parts[1]
@@ -833,11 +897,11 @@ class AddonHandler(BaseHTTPRequestHandler):
                 extra_str = ""
             else:
                 media_id = parts[2]
-                extra_part = parts[3]
+                extra_part = "/".join(parts[3:])
                 extra_str = extra_part[:-5] if extra_part.endswith(".json") else extra_part
 
             extra_params = urllib.parse.parse_qs(extra_str) if extra_str else {}
-            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            query_params = urllib.parse.parse_qs(parsed_url.query)
             filename = (extra_params.get("filename") or query_params.get("filename") or [None])[0]
 
             id_parts = media_id.split(":")
@@ -846,15 +910,14 @@ class AddonHandler(BaseHTTPRequestHandler):
             episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
             host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
             subs = fetch_subtitles_for_stremio(
-                imdb_id, host_base, season=season, episode=episode, filename=filename, full_media_id=media_id, url_cfg=url_cfg
+                imdb_id, host_base, season=season, episode=episode, filename=filename, full_media_id=media_id, url_cfg=url_cfg, fast_mode=False
             )
-            return self._send_json({"subtitles": subs})
+            return self._send_json({"subtitles": subs}, head_only=head_only)
 
-        return self._send_json({"error": "Not found"}, status=404)
+        return self._send_json({"error": "Not found"}, status=404, head_only=head_only)
 
 
 if __name__ == "__main__":
-    import threading
     import webbrowser
 
     def _auto_open_browser():
@@ -867,7 +930,7 @@ if __name__ == "__main__":
     threading.Thread(target=_auto_open_browser, daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AddonHandler)
-    print(f"TorrentX Stremio/Harbor/Nuvio Addon running at http://0.0.0.0:{PORT}/manifest.json")
+    print(f"TorrentX Stremio/Harbor/Nuvio Addon running at http://127.0.0.1:{PORT}/manifest.json")
     print(f"Configure page: http://127.0.0.1:{PORT}/configure")
     try:
         server.serve_forever()
