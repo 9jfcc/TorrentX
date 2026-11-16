@@ -323,7 +323,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
             try:
                 token = uuid.uuid4().hex[:16]
                 dl = subtitle_manager.download_subtitle_file(c, tmpdir, file_basename=token)
-                saved_path = dl.get("path") if isinstance(dl, dict) else None
+                saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
                 if not saved_path or not os.path.exists(saved_path):
                     continue
                 with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
