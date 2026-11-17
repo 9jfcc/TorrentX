@@ -618,11 +618,63 @@ def deduce_release_type(name, all_releases=None, commentary=None):
 # ==========================================
 # Parallel Search & Two-Tier Ranking (SubSource + SubDL ONLY)
 # ==========================================
+def _inspect_episode_match(text_blob, season, episode):
+    """
+    Checks if a subtitle release name/metadata matches the target (season, episode).
+    Returns:
+      - 'exact': Explicitly matches target episode (e.g. S01E05, 1x05, E05, Ep 5)
+      - 'pack': Season pack / complete season without a conflicting episode number
+      - 'conflict': Explicitly belongs to a DIFFERENT episode (e.g. S01E01 when target is E05)
+      - 'unknown': No explicit episode markers found
+    """
+    if not episode:
+        return "exact"
+    s_int = int(season) if season else 1
+    e_int = int(episode)
+    norm = normalize_fancy_unicode(text_blob or "")
+
+    # 1. Check all SxxExx or SxEx patterns
+    se_matches = re.findall(r"(?:^|[^a-z0-9])s0*(\d{1,2})[._\-\s]*e0*(\d{1,3})(?:[._\-\s]*e?0*(\d{1,3}))?(?:$|[^a-z0-9])", norm)
+    if se_matches:
+        for ms, me1, me2 in se_matches:
+            if int(ms) == s_int:
+                e1 = int(me1)
+                e2 = int(me2) if me2 else e1
+                if e1 <= e_int <= e2:
+                    return "exact"
+        return "conflict"
+
+    # 2. Check 1x05 patterns
+    x_matches = re.findall(r"(?:^|[^a-z0-9])0*(\d{1,2})x0*(\d{1,3})(?:$|[^a-z0-9])", norm)
+    if x_matches:
+        for ms, me in x_matches:
+            if int(ms) == s_int and int(me) == e_int:
+                return "exact"
+        return "conflict"
+
+    # 3. Check standalone Episode / E05 / الحلقة 5 patterns
+    ep_matches = re.findall(r"(?:^|[^a-z0-9])(?:ep|episode|e|حلقة|الحلقة)[._\-\s]*0*(\d{1,3})(?:$|[^a-z0-9])", norm)
+    if ep_matches:
+        if any(int(me) == e_int for me in ep_matches):
+            return "exact"
+        return "conflict"
+
+    # 4. Check if it's a full season pack
+    pack_signals = [
+        rf"s0*{s_int}\b", rf"season\s*0*{s_int}\b", r"complete", r"pack",
+        r"الموسم", r"موسم\s*كامل", r"كامل"
+    ]
+    if any(re.search(p, norm) for p in pack_signals):
+        return "pack"
+
+    return "unknown"
+
+
 def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, season=None, episode=None, subdl_key=None, subsource_key=None, wyzie_key=None):
     """
-    Searches SubSource, SubDL, and optionally Wyzie (if wyzie_key configured) in parallel,
-    classifies into Tier 1 (Official Platforms) and Tier 2 (Translators/Teams),
-    and deduplicates previews.
+    Searches SubSource, SubDL, and optionally Wyzie in parallel,
+    strictly filters out wrong episodes for TV series, classifies into Tier 1 (Official Platforms)
+    and Tier 2 (Translators/Teams), and deduplicates previews.
     """
     results = {
         "query": query,
@@ -643,15 +695,27 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
 
     combined = []
     target_rel = (release_type or "").lower()
-    want_bluray = any(k in target_rel for k in ["remux", "bluray", "blu-ray", "uhd", "bdrip"])
-    want_web = any(k in target_rel for k in ["web", "web-dl", "webrip"])
+    want_bluray = any(k in target_rel for k in ["remux", "bluray", "blu-ray", "uhd", "bdrip", "brrip"])
+    want_web = any(k in target_rel for k in ["web", "web-dl", "webrip", "amzn", "nf", "atvp", "itunes", "dsnp", "hmax"])
 
-    # Prioritize SubSource first because it has rich metadata (productionType, commentary, preview, ratings)
+    grp_match = re.search(r"-([a-zA-Z0-9_]{2,15})(?:\.[a-z0-9]{2,4})?$", target_rel)
+    target_group = grp_match.group(1).lower() if grp_match else ""
+
     for prov in ["subsource", "subdl", "wyzie"]:
         data = results["sources"].get(prov, {})
         if not data.get("success"):
             continue
         for s in data.get("subtitles", []):
+            all_rel_str = " ".join(s.get("all_releases") or [])
+            full_blob = f"{s.get('name', '')} {all_rel_str} {s.get('commentary', '')}"
+
+            ep_status = "exact"
+            if episode is not None:
+                ep_status = _inspect_episode_match(full_blob, season, episode)
+                if ep_status == "conflict":
+                    continue
+            s["ep_match"] = ep_status
+
             cls_info = classify_subtitle_entry(s)
             s["category"] = cls_info["category"]
             s["platform"] = cls_info["platform"]
@@ -662,35 +726,38 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
             s["deduced_type"] = deduced if deduced != "other" else (raw_rel if raw_rel in ["bluray", "web"] else "other")
 
             score = 0
-            # Tier 1: Official Platform Subtitles get highest base priority (+1000)
+            if episode is not None:
+                if ep_status == "exact":
+                    score += 450
+                elif ep_status == "pack":
+                    score += 200
+
             if s["category"] == "platform":
                 score += 1000
                 if s.get("production_type") == "retail":
                     score += 200
             else:
-                # Tier 2: Translator / Team Subtitles (+300 base)
                 score += 300
 
-            # Release type alignment bonus (even though alass can sync anything, matching release type needs 0 shift)
             eff_type = s["deduced_type"]
             if want_bluray:
                 if eff_type in ["bluray", "both"]:
-                    score += 150
-                elif eff_type == "other":
-                    score += 40
+                    score += 220
+                elif eff_type == "web":
+                    score -= 40
             elif want_web:
                 if eff_type in ["web", "both"]:
-                    score += 150
-                elif eff_type == "other":
-                    score += 40
+                    score += 220
+                elif eff_type == "bluray":
+                    score -= 40
 
-            # Exact release group match in all_releases
-            if release_type:
-                all_rel_text = " ".join(s.get("all_releases") or [s.get("name", "")]).lower()
-                if release_type.lower() in all_rel_text:
-                    score += 120
+            norm_blob = full_blob.lower()
+            if target_group and len(target_group) >= 3 and re.search(rf"\b{re.escape(target_group)}\b", norm_blob):
+                score += 260
+            for ptag in ["amzn", "nf", "netflix", "atvp", "itunes", "dsnp", "hmax", "bluray", "remux", "web-dl", "webrip"]:
+                if ptag in target_rel and ptag in norm_blob:
+                    score += 90
 
-            # Trusted translators / teams boost
             trans_lower = (s["translator"] + " " + (s.get("author") or "") + " " + (s.get("commentary") or "")).lower()
             trusted_names = [
                 "علي طلال", "ali talal", "dr.ali", "فؤاد الخفاجي", "محمد النعيمي",
@@ -700,17 +767,14 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
             if any(t in trans_lower for t in trusted_names):
                 score += 90
 
-            # Downloads & Good Ratings bonus
             score += min(int(s.get("downloads", 0)) // 20, 80)
             score += min(int(s.get("rating_good", 0)) * 5, 60)
             if s.get("rating_bad", 0) > s.get("rating_good", 0):
                 score -= 100
 
-            # Slight preference for non-HI (normal dialogue without sound effects)
             if s.get("hi"):
                 score -= 25
 
-            # Compute preview signature if preview exists (for pre-download deduplication)
             if s.get("preview"):
                 s["preview_sig"] = compute_dialogue_signature(s["preview"], is_path=False)
 
@@ -719,7 +783,6 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
 
     combined.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Deduplicate entries that have identical preview signatures (keeping the highest-scored one, while inheriting specific platform name if present)
     unique_ranked = []
     seen_preview_entries = []
     for item in combined:
@@ -731,7 +794,6 @@ def search_all_subtitles(query, imdb_id=None, lang="ar", release_type=None, seas
                     dup_master = existing_item
                     break
             if dup_master is not None:
-                # If the duplicate has a specific platform name (e.g. Netflix) and the master had generic BluRay-Retail, inherit the specific platform name!
                 if item.get("platform") and item["platform"] not in ["BluRay-Retail", "Official-Retail"]:
                     if dup_master.get("platform") in [None, "BluRay-Retail", "Official-Retail"]:
                         dup_master["platform"] = item["platform"]
@@ -845,20 +907,27 @@ def download_subtitle_file(sub_item, output_dir, file_basename=None):
     extracted_files = []
     if content.startswith(b"PK\x03\x04"):
         z = zipfile.ZipFile(io.BytesIO(content))
-        valid_entries = [n for n in z.namelist() if n.lower().endswith((".srt", ".ass", ".ssa", ".vtt")) and not n.startswith("__MACOSX")]
-        # Prefer .srt over .ass if both are in the zip
+        valid_entries = [
+            n for n in z.namelist()
+            if n.lower().endswith((".srt", ".ass", ".ssa", ".vtt"))
+            and not n.startswith("__MACOSX")
+            and not os.path.basename(n).startswith(".")
+        ]
         srt_entries = [n for n in valid_entries if n.lower().endswith(".srt")]
         pool_entries = srt_entries if srt_entries else valid_entries
 
         chosen_entry = None
         if file_basename and pool_entries:
-            ep_match = re.search(r'\b[sS](\d{1,2})[eE](\d{1,2})\b', file_basename)
+            ep_match = re.search(r'(?:^|[^a-zA-Z0-9])[sS]0*(\d{1,2})[._\-\s]*[eE]0*(\d{1,3})(?:$|[^a-zA-Z0-9])', file_basename)
             if ep_match:
                 s_int, e_int = int(ep_match.group(1)), int(ep_match.group(2))
                 patterns = [
-                    rf'[sS]{s_int:02d}[eE]{e_int:02d}',
-                    rf'\b[eE]{e_int:02d}\b',
-                    rf'\b{s_int}x{e_int:02d}\b',
+                    rf'(?:^|[^a-zA-Z0-9])[sS]0*{s_int}[._\-\s]*[eE]0*{e_int}(?!\d)',
+                    rf'(?:^|[^0-9])0*{s_int}[xX]0*{e_int}(?!\d)',
+                    rf'(?:^|[^a-zA-Z0-9])[eE][pP]?[._\-\s]*0*{e_int}(?!\d)',
+                    rf'(?:episode|حلقة|الحلقة)[._\-\s]*0*{e_int}(?!\d)',
+                    rf'(?:^|[/\\._\-\s])0*{s_int}{e_int:02d}(?!\d)',
+                    rf'(?:^|[/\\._\-\s])0*{e_int:02d}(?=\.(?:srt|ass|ssa|vtt)$)',
                 ]
                 for p in patterns:
                     for ve in pool_entries:
@@ -867,6 +936,12 @@ def download_subtitle_file(sub_item, output_dir, file_basename=None):
                             break
                     if chosen_entry:
                         break
+
+                if not chosen_entry and len(pool_entries) > 1:
+                    return {"error": True, "message": f"Episode S{s_int:02d}E{e_int:02d} not found inside ZIP archive"}
+                if not chosen_entry and len(pool_entries) == 1:
+                    if _inspect_episode_match(pool_entries[0], s_int, e_int) == "conflict":
+                        return {"error": True, "message": f"Single file in ZIP belongs to a different episode: {pool_entries[0]}"}
 
         if not chosen_entry and pool_entries:
             chosen_entry = pool_entries[0]

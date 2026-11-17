@@ -268,6 +268,12 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
     return ranked_p2p
 
 
+RAW_SUB_TEXT_CACHE = {}  # (provider, id, ep_tag) -> {"ts": float, "text": str}
+_SUBSOURCE_SEM = threading.Semaphore(2)
+_SUBSOURCE_LAST_REQ = 0.0
+_SUBSOURCE_LOCK = threading.Lock()
+
+
 def _resolve_redirect_url(media_url):
     """Resolves HTTP redirects (e.g. Torrentio -> TorBox CDN) once so ffprobe/ffmpeg connect directly."""
     if not media_url or not media_url.startswith("http"):
@@ -280,201 +286,553 @@ def _resolve_redirect_url(media_url):
         return media_url
 
 
-def _extract_first_2min_ref_timestamps(media_url, timeout=10):
-    """Reads ONLY the first ~1 minute of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
+def _build_sampling_windows(duration_sec, is_series=False):
+    """Builds 4 strategic time windows (start_sec, end_sec) across the entire movie/episode."""
+    if not duration_sec or duration_sec < 300:
+        duration_sec = 2520.0 if is_series else 6600.0
+
+    w0_s = 8.0
+    w0_e = min(135.0, duration_sec * 0.18)
+
+    w1_s = max(w0_e + 60.0, round(duration_sec * 0.25))   # ~Min 10-12 on a 42m series
+    w1_e = min(duration_sec - 60.0, w1_s + 115.0)
+
+    w2_s = max(w1_e + 60.0, round(duration_sec * 0.52))   # ~Min 22 on a 42m series
+    w2_e = min(duration_sec - 40.0, w2_s + 115.0)
+
+    w3_s = max(w2_e + 60.0, round(duration_sec * 0.78))   # ~Min 33 on a 42m series
+    w3_e = min(duration_sec - 15.0, w3_s + 115.0)
+
+    windows = [(w0_s, w0_e)]
+    for ws, we in [(w1_s, w1_e), (w2_s, w2_e), (w3_s, w3_e)]:
+        if we - ws >= 45.0 and ws > windows[-1][1]:
+            windows.append((ws, we))
+    return windows
+
+
+def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
+    """
+    Extracts embedded subtitle PTS timestamps across 4 windows spanning the entire episode/movie
+    (Beginning, ~25% [Min 10-12], ~52% [Min 22], ~78% [Min 33]) in a single ffprobe read_intervals call.
+    Returns dict: {"times": [...], "windows": [(s, e), ...], "duration": float, "fps": float, "source": "sub"} or None.
+    """
     import shutil
     if not media_url or not media_url.startswith("http"):
-        return []
+        return None
 
     now = time.time()
-    cached = REF_TIMES_CACHE.get(media_url)
+    cache_key = f"sub_mw:{media_url}"
+    cached = REF_TIMES_CACHE.get(cache_key)
     if cached and (now - cached.get("ts", 0)) < 3600:
-        return cached.get("times") or []
+        return cached.get("data")
 
     ffprobe = shutil.which("ffprobe") or os.path.expanduser(r"~\AppData\Local\Harbor\ffprobe.exe")
     if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
-        return []
+        return None
 
     direct_url = _resolve_redirect_url(media_url)
 
     try:
-        stream_sel = "s:0"
-        probe_s = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", direct_url],
-            capture_output=True, text=True, timeout=6, encoding="utf-8", errors="replace"
-        )
-        if probe_s.returncode == 0 and probe_s.stdout:
-            s_list = json.loads(probe_s.stdout).get("streams") or []
-            bitmap_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
-            best_idx = None
-            for idx, st in enumerate(s_list):
-                codec = str(st.get("codec_name") or "").lower()
-                tags = st.get("tags") or {}
-                title = str(tags.get("title") or "").lower()
-                forced = (st.get("disposition") or {}).get("forced") == 1 or "forced" in title
-                if forced or codec in bitmap_codecs:
-                    continue
-                best_idx = idx
-                break
-            if best_idx is None:
-                return []
-            stream_sel = f"s:{best_idx}"
-
-        cmd = [
+        probe_cmd = [
             ffprobe, "-v", "quiet", "-print_format", "json",
-            "-select_streams", stream_sel,
-            "-show_packets", "-read_intervals", "%+60",
+            "-show_format", "-show_streams", direct_url
+        ]
+        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=6, encoding="utf-8", errors="replace")
+        if probe_res.returncode != 0 or not probe_res.stdout:
+            return None
+
+        probe_json = json.loads(probe_res.stdout)
+        fmt_info = probe_json.get("format") or {}
+        all_streams = probe_json.get("streams") or []
+
+        duration = float(fmt_info.get("duration") or 0.0)
+        video_fps = 23.976
+        sub_streams = []
+
+        for st in all_streams:
+            ctype = st.get("codec_type")
+            if ctype == "video" and video_fps == 23.976:
+                r_fps = st.get("r_frame_rate") or st.get("avg_frame_rate") or ""
+                if "/" in r_fps:
+                    num, den = r_fps.split("/", 1)
+                    if float(den) > 0:
+                        video_fps = round(float(num) / float(den), 3)
+            elif ctype == "subtitle":
+                sub_streams.append(st)
+            if not duration and st.get("duration"):
+                try:
+                    duration = max(duration, float(st.get("duration")))
+                except Exception:
+                    pass
+
+        bitmap_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+        best_sub_pos = None
+        fallback_sub_pos = None
+
+        for pos, st in enumerate(sub_streams):
+            codec = str(st.get("codec_name") or "").lower()
+            if codec in bitmap_codecs:
+                continue
+            tags = st.get("tags") or {}
+            lang = str(tags.get("language") or "").lower()
+            title = str(tags.get("title") or "").lower()
+            if (st.get("disposition") or {}).get("forced") == 1 or "forced" in title or "commentary" in title or "signs" in title:
+                continue
+            if lang in ("eng", "en", "ara", "ar"):
+                best_sub_pos = pos
+                break
+            if fallback_sub_pos is None:
+                fallback_sub_pos = pos
+
+        chosen_pos = best_sub_pos if best_sub_pos is not None else fallback_sub_pos
+        if chosen_pos is None:
+            return None
+
+        windows = _build_sampling_windows(duration, is_series=is_series)
+        intervals_arg = ",".join(f"{int(ws)}%+{int(we - ws)}" for ws, we in windows)
+
+        pkt_cmd = [
+            ffprobe, "-v", "quiet", "-print_format", "json",
+            "-select_streams", f"s:{chosen_pos}",
+            "-show_packets", "-show_entries", "packet=pts_time",
+            "-read_intervals", intervals_arg,
             direct_url,
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
-        if res.returncode != 0 or not res.stdout:
-            return []
+        pkt_res = subprocess.run(pkt_cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        if pkt_res.returncode != 0 or not pkt_res.stdout:
+            return None
 
-        pkts = json.loads(res.stdout).get("packets") or []
+        pkts = json.loads(pkt_res.stdout).get("packets") or []
+        max_valid_t = (duration + 60.0) if duration > 0 else 14400.0
         pts_list = []
         for p in pkts:
             t = p.get("pts_time")
             if t is not None:
                 val = float(t)
-                if 1.0 <= val <= 185.0:
+                if 1.0 <= val <= max_valid_t:
                     pts_list.append(val)
 
         clean = []
         for val in sorted(pts_list):
-            if not clean or (val - clean[-1]) > 0.35:
+            if not clean or (val - clean[-1]) > 0.30:
                 clean.append(val)
-        result = clean[:50]
-        REF_TIMES_CACHE[media_url] = {"ts": now, "times": result}
-        return result
+
+        if len(clean) < 5:
+            return None
+
+        data = {
+            "times": clean,
+            "windows": windows,
+            "duration": duration or (2520.0 if is_series else 6600.0),
+            "fps": video_fps,
+            "source": "sub",
+        }
+        REF_TIMES_CACHE[cache_key] = {"ts": now, "data": data}
+        return data
     except Exception:
-        return []
+        return None
 
 
-def _extract_audio_speech_ref_timestamps(media_url, timeout=10):
-    """Fallback when video has no embedded text subtitles: extracts first 3 min of audio via ffmpeg and detects speech onsets via ffsubsync's webrtcvad."""
+def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=10):
+    """
+    Multi-Window Audio VAD Fallback: Uses HTTP Range seeking (-ss before -i) across 3 windows
+    (Beginning, ~Minute 11, ~Minute 23) in parallel so FPS drift and mid-episode cuts are caught even without embedded subs.
+    """
     import shutil, tempfile, wave
     if not media_url or not media_url.startswith("http"):
-        return []
+        return None
 
     now = time.time()
-    cache_key = f"aud:{media_url}"
+    cache_key = f"aud_mw:{media_url}"
     cached = REF_TIMES_CACHE.get(cache_key)
     if cached and (now - cached.get("ts", 0)) < 3600:
-        return cached.get("times") or []
+        return cached.get("data")
 
     ffmpeg = shutil.which("ffmpeg") or os.path.expanduser(r"~\AppData\Local\Harbor\ffmpeg.exe")
     if not os.path.exists(ffmpeg) and not shutil.which("ffmpeg"):
-        return []
+        return None
 
     try:
         import webrtcvad
     except ImportError:
-        return []
+        return None
 
     direct_url = _resolve_redirect_url(media_url)
+    windows = [(10.0, 95.0), (640.0, 725.0), (1300.0, 1385.0)] if is_series else [(15.0, 105.0), (1200.0, 1290.0), (3000.0, 3090.0)]
+
+    def _probe_audio_window(win_tuple):
+        ws, we = win_tuple
+        dur = int(we - ws)
+        onsets = []
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                wav_path = os.path.join(tmpdir, "chunk.wav")
+                cmd = [
+                    ffmpeg, "-y", "-v", "quiet",
+                    "-ss", str(int(ws)), "-t", str(dur),
+                    "-i", direct_url,
+                    "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
+                    wav_path,
+                ]
+                res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+                if res.returncode != 0 or not os.path.exists(wav_path):
+                    return onsets
+
+                vad = webrtcvad.Vad(2)
+                frame_ms = 30
+                frame_bytes = int(16000 * (frame_ms / 1000.0) * 2)
+                in_speech = False
+                speech_run = 0
+                silence_run = 0
+
+                with wave.open(wav_path, "rb") as wf:
+                    t_rel = 0.0
+                    while True:
+                        buf = wf.readframes(frame_bytes // 2)
+                        if len(buf) < frame_bytes:
+                            break
+                        if vad.is_speech(buf, 16000):
+                            speech_run += 1
+                            silence_run = 0
+                            if not in_speech and speech_run >= 4 and t_rel >= 0.5:
+                                in_speech = True
+                                onset = round(ws + t_rel - (3 * frame_ms / 1000.0), 3)
+                                if not onsets or (onset - onsets[-1]) > 0.45:
+                                    onsets.append(onset)
+                        else:
+                            silence_run += 1
+                            speech_run = 0
+                            if in_speech and silence_run >= 10:
+                                in_speech = False
+                        t_rel += frame_ms / 1000.0
+        except Exception:
+            pass
+        return onsets
+
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            wav_path = os.path.join(tmpdir, "sample.wav")
-            cmd = [
-                ffmpeg, "-y", "-v", "quiet",
-                "-t", "60", "-i", direct_url,
-                "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
-                wav_path,
-            ]
-            res = subprocess.run(cmd, capture_output=True, timeout=timeout)
-            if res.returncode != 0 or not os.path.exists(wav_path):
-                return []
+        from concurrent.futures import ThreadPoolExecutor
+        all_onsets = []
+        valid_windows = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futs = [(w, pool.submit(_probe_audio_window, w)) for w in windows]
+            for w, fut in futs:
+                w_pts = fut.result()
+                if len(w_pts) >= 3:
+                    all_onsets.extend(w_pts)
+                    valid_windows.append(w)
 
-            vad = webrtcvad.Vad(2)
-            frame_ms = 30
-            frame_bytes = int(16000 * (frame_ms / 1000.0) * 2)
-            speech_onsets = []
-            in_speech = False
-            speech_run = 0
-            silence_run = 0
+        if len(all_onsets) < 5:
+            return None
 
-            with wave.open(wav_path, "rb") as wf:
-                t_sec = 0.0
-                while True:
-                    buf = wf.readframes(frame_bytes // 2)
-                    if len(buf) < frame_bytes:
-                        break
-                    is_sp = vad.is_speech(buf, 16000)
-                    if is_sp:
-                        speech_run += 1
-                        silence_run = 0
-                        if not in_speech and speech_run >= 4 and t_sec >= 1.0:
-                            in_speech = True
-                            onset = round(t_sec - (3 * frame_ms / 1000.0), 3)
-                            if not speech_onsets or (onset - speech_onsets[-1]) > 0.5:
-                                speech_onsets.append(onset)
-                    else:
-                        silence_run += 1
-                        speech_run = 0
-                        if in_speech and silence_run >= 10:
-                            in_speech = False
-                    t_sec += frame_ms / 1000.0
-
-            result = speech_onsets[:50]
-            REF_TIMES_CACHE[cache_key] = {"ts": now, "times": result}
-            return result
+        data = {
+            "times": sorted(all_onsets),
+            "windows": valid_windows,
+            "duration": 2520.0 if is_series else 6600.0,
+            "fps": 23.976,
+            "source": "audio",
+        }
+        REF_TIMES_CACHE[cache_key] = {"ts": now, "data": data}
+        return data
     except Exception:
-        return []
+        return None
 
 
-def _parse_srt_first_cues(srt_text):
-    """Returns start timestamps (seconds) of the first 35 cues in an SRT string."""
+def _parse_srt_all_cues(srt_text):
+    """Returns list of (start_sec, end_sec) for all valid dialogue cues in an SRT string."""
     cues = []
-    for m in re.finditer(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->", srt_text):
-        h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-        sec = h * 3600 + mn * 60 + s + ms / 1000.0
-        if 1.0 <= sec <= 185.0:
-            cues.append(sec)
-        if len(cues) >= 35:
-            break
+    pattern = r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+    for m in re.finditer(pattern, srt_text):
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        st = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
+        et = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
+        if st >= 0.5 and et > st:
+            cues.append((st, et))
     return cues
 
 
-def _analyze_offset_and_inliers(ref_times, sub_times, tol=0.65):
-    """Returns (best_offset, natural_inliers_count, synced_inliers_count, required_min)."""
-    if len(ref_times) < 4 or len(sub_times) < 4:
-        return 0.0, 0, 0, 4
-    req_min = 2 if len(ref_times) < 20 else max(3, min(len(sub_times), 8) // 2)
-    nat_inliers = sum(1 for st in sub_times if abs(st - min(ref_times, key=lambda rt: abs(st - rt))) <= tol)
+def _find_window_offset(ref_w, sub_w, max_shift=75.0, tol=0.55):
+    """Finds the best constant offset (ref - sub) inside a single time window using consensus voting."""
+    if len(ref_w) < 2 or len(sub_w) < 2:
+        return 0.0, 0, 0.0
 
     best_inliers = []
-    for r0 in ref_times[:12]:
-        for s0 in sub_times[:12]:
-            cand = r0 - s0
-            if abs(cand) > 60.0:
-                continue
-            inliers = []
-            for st in sub_times:
-                closest = min(ref_times, key=lambda rt: abs((st + cand) - rt))
-                if abs((st + cand) - closest) <= tol:
-                    inliers.append(closest - st)
-            if len(inliers) > len(best_inliers):
-                best_inliers = inliers
+    candidates = []
+    for r in ref_w:
+        for s in sub_w:
+            diff = r - s
+            if abs(diff) <= max_shift:
+                candidates.append(diff)
 
-    if len(best_inliers) >= req_min:
-        best_inliers.sort()
-        median_off = best_inliers[len(best_inliers) // 2]
-        off = round(median_off, 3) if abs(median_off) >= 0.15 else 0.0
-        return off, nat_inliers, len(best_inliers), req_min
-    return 0.0, nat_inliers, len(best_inliers), req_min
+    if not candidates:
+        return 0.0, 0, 0.0
+
+    from collections import Counter
+    bins = Counter(round(c * 5) / 5.0 for c in candidates)
+    top_centers = [b for b, _ in bins.most_common(8)]
+
+    for cand in top_centers:
+        inliers = []
+        for s in sub_w:
+            closest_r = min(ref_w, key=lambda r: abs((s + cand) - r))
+            if abs((s + cand) - closest_r) <= tol:
+                inliers.append(closest_r - s)
+        if len(inliers) > len(best_inliers):
+            best_inliers = inliers
+
+    if not best_inliers:
+        return 0.0, 0, 0.0
+
+    best_inliers.sort()
+    median_off = best_inliers[len(best_inliers) // 2]
+    refined = [
+        min(ref_w, key=lambda r: abs((s + median_off) - r)) - s
+        for s in sub_w
+        if abs((s + median_off) - min(ref_w, key=lambda r: abs((s + median_off) - r))) <= tol
+    ]
+    if refined:
+        refined.sort()
+        median_off = refined[len(refined) // 2]
+        best_inliers = refined
+
+    denom = max(1, min(len(ref_w), len(sub_w)))
+    ratio = len(best_inliers) / float(denom)
+    return round(median_off, 3), len(best_inliers), ratio
 
 
-def _compute_fast_offset(ref_times, sub_times):
-    """Finds median consensus offset (ref - sub) in seconds within [-60s, +60s]."""
-    off, _, synced_cnt, req_min = _analyze_offset_and_inliers(ref_times, sub_times)
-    return off if synced_cnt >= req_min else 0.0
+def _evaluate_transform_across_windows(ref_data, sub_starts, transform_fn, tol=0.55):
+    """
+    Evaluates a timestamp transformation f(t) across all sampled reference windows.
+    Returns (total_inliers, matched_windows_count, active_windows_count, window_details).
+    """
+    ref_times = ref_data.get("times") or []
+    windows = ref_data.get("windows") or [(10.0, 180.0)]
+    transformed = [transform_fn(s) for s in sub_starts]
+
+    total_inliers = 0
+    matched_windows = 0
+    active_windows = 0
+    details = []
+
+    for ws, we in windows:
+        ref_w = [r for r in ref_times if ws <= r <= we]
+        if len(ref_w) < 2:
+            continue
+        active_windows += 1
+        sub_w = [t for t in transformed if (ws - 1.5) <= t <= (we + 1.5)]
+        inliers = 0
+        for t in sub_w:
+            closest = min(ref_w, key=lambda r: abs(t - r))
+            if abs(t - closest) <= tol:
+                inliers += 1
+        req_w = max(2, min(len(ref_w), max(2, len(sub_w))) // 3)
+        is_ok = inliers >= req_w
+        if is_ok:
+            matched_windows += 1
+        total_inliers += inliers
+        details.append((ws, we, inliers, len(ref_w), is_ok))
+
+    return total_inliers, matched_windows, max(1, active_windows), details
 
 
-def _shift_srt_text(text, offset_seconds):
-    """Shifts all SRT timestamps in-memory by offset_seconds (+ delay, - advance)."""
-    if not offset_seconds or abs(offset_seconds) < 0.001:
+def _solve_full_sync_model(ref_data, sub_cues):
+    """
+    Solves for the optimal full-episode synchronization model across all sampled windows:
+      - Model 0 ('natural'): 0 shift needed, verified across early AND mid/late windows.
+      - Model 1 ('constant'): uniform shift t' = t + b verified across windows.
+      - Model 2 ('affine_fps'): linear/FPS drift correction t' = a * t + b (fixes 25fps <-> 23.976fps/24fps drift at min 12+).
+      - Model 3 ('piecewise'): per-act segment shifts snapped to scene silence gaps (fixes TV commercial break cut differences).
+    Returns dict describing the best model, tier (0, 1, or 2), score, and human label.
+    """
+    if not ref_data or not ref_data.get("times") or len(sub_cues) < 5:
+        return {"mode": "none", "tier": 2, "score": 0, "label": ""}
+
+    ref_times = ref_data["times"]
+    windows = ref_data.get("windows") or [(10.0, 180.0)]
+    tol = 0.68 if ref_data.get("source") == "audio" else 0.55
+    sub_starts = [c[0] for c in sub_cues]
+
+    nat_inliers, nat_win_ok, active_wins, _ = _evaluate_transform_across_windows(
+        ref_data, sub_starts, lambda t: t, tol=tol
+    )
+
+    win_stats = []
+    for ws, we in windows:
+        ref_w = [r for r in ref_times if ws <= r <= we]
+        if len(ref_w) < 2:
+            continue
+        sub_w = [s for s in sub_starts if (ws - 80.0) <= s <= (we + 80.0)]
+        off_w, cnt_w, rat_w = _find_window_offset(ref_w, sub_w, max_shift=75.0, tol=tol)
+        req_w = max(2, min(len(ref_w), 8) // 3)
+        if cnt_w >= req_w:
+            center_t = 0.5 * (ws + we) - off_w
+            win_stats.append((center_t, off_w, cnt_w, rat_w, ws, we))
+
+    if win_stats:
+        all_small_offsets = all(abs(w[1]) <= 0.35 for w in win_stats)
+        has_mid_late_check = any(w[4] >= 300.0 for w in win_stats) if active_wins >= 2 else True
+        if all_small_offsets and len(win_stats) >= max(1, active_wins - 1) and has_mid_late_check:
+            avg_off = sum(w[1] * w[2] for w in win_stats) / max(1, sum(w[2] for w in win_stats))
+            micro_off = round(avg_off, 3) if abs(avg_off) >= 0.12 else 0.0
+            return {
+                "mode": "constant",
+                "a": 1.0,
+                "b": micro_off,
+                "segments": [],
+                "tier": 0,
+                "score": nat_inliers + (nat_win_ok * 25) + 50,
+                "label": "✅ متزامنة",
+            }
+
+    best_model = {
+        "mode": "none",
+        "a": 1.0,
+        "b": 0.0,
+        "segments": [],
+        "tier": 2,
+        "score": nat_inliers,
+        "win_ok": nat_win_ok,
+        "label": "",
+    }
+
+    cand_offsets = set(round(w[1], 3) for w in win_stats)
+    if win_stats:
+        weighted_b = sum(w[1] * w[2] for w in win_stats) / max(1, sum(w[2] for w in win_stats))
+        cand_offsets.add(round(weighted_b, 3))
+
+    for b_cand in cand_offsets:
+        inl, w_ok, _, _ = _evaluate_transform_across_windows(ref_data, sub_starts, lambda t, b=b_cand: t + b, tol=tol)
+        sc = inl + (w_ok * 22)
+        if sc > best_model["score"] and (w_ok >= max(1, active_wins - 1) or inl >= 6):
+            sign = "+" if b_cand >= 0 else ""
+            best_model = {
+                "mode": "constant",
+                "a": 1.0,
+                "b": b_cand,
+                "segments": [],
+                "tier": 0 if (abs(b_cand) < 0.35 and w_ok == active_wins) else 1,
+                "score": sc,
+                "win_ok": w_ok,
+                "label": "✅ متزامنة" if (abs(b_cand) < 0.35 and w_ok == active_wins) else f"🔄 تمت المزامنة ({sign}{b_cand:.1f}s)",
+            }
+
+    fps_ratios = [
+        25.0 / 23.976024,
+        23.976024 / 25.0,
+        24.0 / 23.976024,
+        23.976024 / 24.0,
+        25.0 / 24.0,
+        24.0 / 25.0,
+    ]
+    affine_candidates = []
+    for a_rat in fps_ratios:
+        for ws, we in windows[:2]:
+            ref_w = [r for r in ref_times if ws <= r <= we]
+            sub_w = [a_rat * s for s in sub_starts if (ws - 80.0) <= (a_rat * s) <= (we + 80.0)]
+            b_est, cnt_est, _ = _find_window_offset(ref_w, sub_w, max_shift=75.0, tol=tol)
+            if cnt_est >= 2:
+                affine_candidates.append((a_rat, b_est))
+
+    if len(win_stats) >= 2:
+        for i in range(len(win_stats)):
+            for j in range(i + 1, len(win_stats)):
+                t1, off1 = win_stats[i][0], win_stats[i][1]
+                t2, off2 = win_stats[j][0], win_stats[j][1]
+                if (t2 - t1) >= 250.0 and abs(off2 - off1) >= 0.45:
+                    a_emp = 1.0 + (off2 - off1) / (t2 - t1)
+                    if 0.94 <= a_emp <= 1.06:
+                        b_emp = off1 - (a_emp - 1.0) * t1
+                        affine_candidates.append((a_emp, round(b_emp, 3)))
+
+    for a_cand, b_cand in affine_candidates:
+        inl, w_ok, _, _ = _evaluate_transform_across_windows(
+            ref_data, sub_starts, lambda t, a=a_cand, b=b_cand: a * t + b, tol=tol
+        )
+        sc = inl + (w_ok * 24)
+        if w_ok >= 2 and sc > (best_model["score"] + 3):
+            best_model = {
+                "mode": "affine",
+                "a": a_cand,
+                "b": b_cand,
+                "segments": [],
+                "tier": 1,
+                "score": sc,
+                "win_ok": w_ok,
+                "label": "🔄 تمت المزامنة (ضبط FPS + التوقيت)",
+            }
+
+    if len(win_stats) >= 2 and best_model.get("win_ok", 0) < len(win_stats):
+        offsets_seq = [w[1] for w in win_stats]
+        if (max(offsets_seq) - min(offsets_seq)) >= 0.60:
+            segments = []
+            for idx, w in enumerate(win_stats):
+                seg_off = w[1]
+                if idx == 0:
+                    seg_start = 0.0
+                else:
+                    prev_we = win_stats[idx - 1][5] - win_stats[idx - 1][1]
+                    curr_ws = w[4] - w[1]
+                    best_gap_mid = 0.5 * (prev_we + curr_ws)
+                    best_gap_dur = 0.0
+                    for c_i in range(len(sub_cues) - 1):
+                        end_curr = sub_cues[c_i][1]
+                        start_next = sub_cues[c_i + 1][0]
+                        if prev_we - 20.0 <= end_curr <= curr_ws + 20.0:
+                            gap = start_next - end_curr
+                            if gap > best_gap_dur:
+                                best_gap_dur = gap
+                                best_gap_mid = 0.5 * (end_curr + start_next)
+                    seg_start = best_gap_mid
+                segments.append([seg_start, 999999.0, seg_off])
+                if idx > 0:
+                    segments[idx - 1][1] = seg_start
+
+            def _piecewise_fn(t, segs=segments):
+                for s_st, s_et, s_off in segs:
+                    if s_st <= t < s_et:
+                        return t + s_off
+                return t + segs[-1][2]
+
+            inl, w_ok, _, _ = _evaluate_transform_across_windows(ref_data, sub_starts, _piecewise_fn, tol=tol)
+            sc = inl + (w_ok * 22)
+            if w_ok > best_model.get("win_ok", 0) and sc > (best_model["score"] + 4):
+                best_model = {
+                    "mode": "piecewise",
+                    "a": 1.0,
+                    "b": 0.0,
+                    "segments": segments,
+                    "tier": 1,
+                    "score": sc,
+                    "win_ok": w_ok,
+                    "label": "🔄 تمت المزامنة (متعددة الفصول)",
+                }
+
+    return best_model
+
+
+def _apply_sync_model_to_srt(text, model):
+    """Applies Constant, Affine (FPS a*t+b), or Piecewise Act-Break transformation to all SRT timestamps."""
+    if not model or model.get("mode") in (None, "none"):
         return text
-    diff_ms = int(round(offset_seconds * 1000))
+
+    mode = model.get("mode")
+    a = float(model.get("a", 1.0))
+    b = float(model.get("b", 0.0))
+    segments = model.get("segments") or []
+
+    if mode == "constant" and abs(b) < 0.005:
+        return text
+
+    def _transform_sec(sec):
+        if mode == "constant":
+            return sec + b
+        if mode == "affine":
+            return (a * sec) + b
+        if mode == "piecewise" and segments:
+            for s_st, s_et, s_off in segments:
+                if s_st <= sec < s_et:
+                    return sec + s_off
+            return sec + segments[-1][2]
+        return sec
 
     def _fmt(ms_val):
         nh = ms_val // 3600000
@@ -484,55 +842,96 @@ def _shift_srt_text(text, offset_seconds):
         return f"{nh:02d}:{nm:02d}:{ns:02d},{nms:03d}"
 
     def _shift_match(m):
-        h1, m1, s1, ms1, h2, m2, s2, ms2 = m.groups()
-        ms_start = (int(h1) * 3600 + int(m1) * 60 + int(s1)) * 1000 + int(ms1)
-        ms_end = (int(h2) * 3600 + int(m2) * 60 + int(s2)) * 1000 + int(ms2)
-        new_start = max(0, ms_start + diff_ms)
-        new_end = max(new_start + 500, ms_end + diff_ms)
-        return f"{_fmt(new_start)} --> {_fmt(new_end)}"
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        st_sec = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
+        et_sec = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
+        new_st_ms = max(0, int(round(_transform_sec(st_sec) * 1000)))
+        new_et_ms = max(new_st_ms + 450, int(round(_transform_sec(et_sec) * 1000)))
+        return f"{_fmt(new_st_ms)} --> {_fmt(new_et_ms)}"
 
     pattern = r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
     return re.sub(pattern, _shift_match, text)
 
 
-def _score_and_sync_subtitle(cand, ref_times, ep_tag=""):
-    """Downloads subtitle, measures natural vs shifted sync against ref_times, syncs if needed, and returns (tier, score, offset, bytes)."""
+def _download_candidate_text_cached(cand, ep_tag=""):
+    """Downloads, extracts, cleans, and caches raw subtitle text with SubSource 429 rate-limit protection."""
+    global _SUBSOURCE_LAST_REQ
+
+    prov = (cand.get("provider") or "").lower()
+    cid = str(cand.get("id") or cand.get("download_url") or "")
+    cache_key = (prov, cid, ep_tag)
+
+    now = time.time()
+    cached = RAW_SUB_TEXT_CACHE.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) < 7200 and cached.get("text"):
+        return cached["text"]
+
+    if prov == "subsource":
+        with _SUBSOURCE_SEM:
+            with _SUBSOURCE_LOCK:
+                elapsed = time.time() - _SUBSOURCE_LAST_REQ
+                if elapsed < 0.22:
+                    time.sleep(0.22 - elapsed)
+                _SUBSOURCE_LAST_REQ = time.time()
+            text = _do_raw_sub_download(cand, ep_tag)
+    else:
+        text = _do_raw_sub_download(cand, ep_tag)
+
+    if text:
+        RAW_SUB_TEXT_CACHE[cache_key] = {"ts": time.time(), "text": text}
+    return text
+
+
+def _do_raw_sub_download(cand, ep_tag=""):
     import tempfile
     base_name = f"{ep_tag}_sub" if ep_tag else "sub"
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename=base_name)
-            saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
+            if not isinstance(dl, dict) or not dl.get("success"):
+                return None
+            saved_path = dl.get("file_path") or dl.get("path")
             if not saved_path or not os.path.exists(saved_path):
-                return 3, 0, 0.0, None
-            with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = subtitle_manager.clean_subtitle_ads(f.read())
-
-            if not ref_times:
-                b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
-                return 2, 0, 0.0, b
-
-            sub_times = _parse_srt_first_cues(text)
-            off, nat_cnt, sync_cnt, req_min = _analyze_offset_and_inliers(ref_times, sub_times)
-            if nat_cnt >= req_min and abs(off) < 0.35:
-                tier = 0  # Already naturally synced
-                score = nat_cnt
-                applied_off = 0.0
-            elif sync_cnt >= req_min:
-                tier = 1  # Auto-synced by shifting
-                score = sync_cnt
-                applied_off = off
-                if off != 0.0:
-                    text = _shift_srt_text(text, off)
-            else:
-                tier = 2  # Could not verify sync against embedded ref
-                score = max(nat_cnt, sync_cnt)
-                applied_off = 0.0
-
-            b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
-            return tier, score, applied_off, b
+                return None
+            with open(saved_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                raw_text = f.read()
+            cleaned = subtitle_manager.fix_arabic_rtl_text(raw_text)
+            return cleaned if len(cleaned.strip()) > 100 else None
     except Exception:
-        return 3, 0, 0.0, None
+        return None
+
+
+def _score_and_sync_subtitle(cand, ref_data, ep_tag=""):
+    """
+    Downloads subtitle (cached), solves full-episode sync model (Natural / Constant / FPS Affine / Piecewise),
+    applies transformation + RTL punctuation fix, and returns (tier, score, sync_label, bytes, signature).
+    """
+    try:
+        text = _download_candidate_text_cached(cand, ep_tag=ep_tag)
+        if not text:
+            return 3, 0, "", None, None
+
+        sig = subtitle_manager.compute_dialogue_signature(text, is_path=False)
+        if sig.get("line_count", 0) < 10:
+            return 3, 0, "", None, None
+
+        if not ref_data or not ref_data.get("times"):
+            b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
+            return 2, int(cand.get("score", 0)) // 20, "", b, sig
+
+        sub_cues = _parse_srt_all_cues(text)
+        model = _solve_full_sync_model(ref_data, sub_cues)
+        tier = model.get("tier", 2)
+        sync_score = model.get("score", 0)
+        sync_label = model.get("label", "")
+
+        if tier in (0, 1):
+            text = _apply_sync_model_to_srt(text, model)
+
+        b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
+        return tier, sync_score, sync_label, b, sig
+    except Exception:
+        return 3, 0, "", None, None
 
 
 def _resolve_and_cache_sub(token):
@@ -546,29 +945,13 @@ def _resolve_and_cache_sub(token):
     if not cand:
         return None
 
-    ref_times = item.get("ref_times") or []
+    ref_data = item.get("ref_data")
     ep_tag = item.get("ep_tag") or ""
-    base_name = f"{ep_tag}_{token}" if ep_tag else token
     try:
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename=base_name)
-            saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
-            if not saved_path or not os.path.exists(saved_path):
-                return None
-            with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = subtitle_manager.clean_subtitle_ads(f.read())
-
-            if ref_times:
-                sub_times = _parse_srt_first_cues(text)
-                offset = _compute_fast_offset(ref_times, sub_times)
-                if offset != 0.0:
-                    text = _shift_srt_text(text, offset)
-
-            # UTF-8 with BOM helps MPV/Windows players detect Arabic encoding reliably
-            b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
+        _tier, _score, _lbl, b, _sig = _score_and_sync_subtitle(cand, ref_data, ep_tag=ep_tag)
+        if b:
             item["bytes"] = b
-            return b
+        return b
     except Exception as e:
         logger.warning("Error resolving sub %s: %s", token, e)
         return None
@@ -663,13 +1046,15 @@ def _inject_harbor_addon(manifest_url, mode_label="TorrentX", url_cfg=None):
 
 
 def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, filename=None, full_media_id=None, url_cfg=None, fast_mode=False):
-    """Arabic subtitle search (SubSource + SubDL + Wyzie) with on-demand streaming."""
+    """Arabic subtitle search (SubSource + SubDL + Wyzie) with Multi-Window Full-Episode Synchronization."""
     now = time.time()
     for k in [k for k, v in list(SUB_CACHE.items()) if now - v.get("ts", 0) > 7200]:
         SUB_CACHE.pop(k, None)
 
-    release_type = None
+    is_series = bool(season is not None and episode is not None)
+    release_hint = filename or ""
     cdn_url = None
+
     meta_entry = STREAM_META_CACHE.get(full_media_id or imdb_id) or STREAM_META_CACHE.get(imdb_id)
     if meta_entry and meta_entry.get("items"):
         items = meta_entry["items"]
@@ -677,10 +1062,11 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         if filename:
             fn_low = filename.lower()
             for it in items:
-                if it.get("title", "").lower() == fn_low or fn_low in it.get("title", "").lower():
+                it_title = (it.get("title") or "").lower()
+                if it_title == fn_low or fn_low in it_title or it_title in fn_low:
                     chosen = it
                     break
-        release_type = chosen.get("release_type")
+        release_hint = filename or chosen.get("title") or chosen.get("release_type") or ""
         cdn_url = chosen.get("url")
 
     query_title = imdb_id
@@ -698,16 +1084,16 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
     target_lang = (url_cfg or {}).get("sub_lang") or "ar"
     stremio_lang = "ara" if target_lang == "ar" else ("eng" if target_lang == "en" else target_lang)
 
-    def _get_ref_times():
+    def _get_ref_data():
         if fast_mode or not cdn_url:
-            return []
-        rt = _extract_first_2min_ref_timestamps(cdn_url)
-        return rt if rt else _extract_audio_speech_ref_timestamps(cdn_url)
+            return None
+        rd = _extract_multiwindow_ref_timestamps(cdn_url, is_series=is_series)
+        return rd if rd else _extract_audio_speech_ref_timestamps(cdn_url, is_series=is_series)
 
     def _search_subs():
         try:
             res = subtitle_manager.search_all_subtitles(
-                query_title, imdb_id=imdb_id, lang=target_lang, release_type=release_type,
+                query_title, imdb_id=imdb_id, lang=target_lang, release_type=release_hint,
                 season=season, episode=episode,
                 subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
             )
@@ -716,72 +1102,77 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
             logger.warning("Subtitle search error for %s: %s", imdb_id, e)
             return []
 
-    subs = []
     if not fast_mode and cdn_url:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as pool:
-            f_ref = pool.submit(_get_ref_times)
+            f_ref = pool.submit(_get_ref_data)
             f_sub = pool.submit(_search_subs)
-            ref_times = f_ref.result()
+            ref_data = f_ref.result()
             candidates = f_sub.result()
     else:
-        ref_times = []
+        ref_data = None
         candidates = _search_subs()
 
     if target_lang == "ar":
-        clean_cand = []
-        for c in candidates:
-            c_lang = str(c.get("language") or c.get("lang") or "").lower()
-            if c_lang in ("ar", "ara", "arabic", ""):
-                clean_cand.append(c)
-        candidates = clean_cand
+        candidates = [
+            c for c in candidates
+            if str(c.get("language") or c.get("lang") or "").lower() in ("ar", "ara", "arabic", "")
+        ]
 
-    ep_tag = f"S{int(season):02d}E{int(episode):02d}" if (season is not None and episode is not None) else ""
+    ep_tag = f"S{int(season):02d}E{int(episode):02d}" if is_series else ""
     ranked_entries = []
 
-    if not fast_mode and ref_times:
+    if not fast_mode and candidates:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        ss_list = [c for c in candidates if (c.get("provider") or "").lower() == "subsource"][:2]
-        sd_list = [c for c in candidates if (c.get("provider") or "").lower() == "subdl"][:2]
+        ss_list = [c for c in candidates if (c.get("provider") or "").lower() == "subsource"][:3]
+        sd_list = [c for c in candidates if (c.get("provider") or "").lower() == "subdl"][:3]
         other_list = [c for c in candidates if c not in ss_list and c not in sd_list]
-        eval_pool = (ss_list + sd_list + other_list)[:4]
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            futs = {pool.submit(_score_and_sync_subtitle, c, ref_times, ep_tag): (idx, c) for idx, c in enumerate(eval_pool)}
+        eval_pool = (ss_list + sd_list + other_list)[:6]
+        eval_pool.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        raw_evaluated = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {
+                pool.submit(_score_and_sync_subtitle, c, ref_data, ep_tag): (idx, c)
+                for idx, c in enumerate(eval_pool)
+            }
             for fut in as_completed(futs):
                 idx, c = futs[fut]
                 try:
-                    tier, score, applied_off, b = fut.result()
+                    tier, sync_score, sync_label, b, sig = fut.result()
                 except Exception:
-                    tier, score, applied_off, b = 3, 0, 0.0, None
+                    tier, sync_score, sync_label, b, sig = 3, 0, "", None, None
                 if b:
-                    ranked_entries.append((tier, -score, idx, c, applied_off, b))
-                else:
-                    ranked_entries.append((3, 0, idx, c, 0.0, None))
-        ranked_entries.sort(key=lambda x: (x[0], x[1], x[2]))
-        verified = [e for e in ranked_entries if e[0] in (0, 1)]
-        if len(verified) >= 2:
-            ranked_entries = verified[:6]
-        else:
-            ranked_entries = ranked_entries[:6]
+                    raw_evaluated.append((tier, -sync_score, idx, c, sync_label, b, sig))
+
+        raw_evaluated.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        seen_sigs = []
+        for entry in raw_evaluated:
+            tier, neg_sc, idx, c, sync_label, b, sig = entry
+            if sig and sig.get("sample_set"):
+                if any(subtitle_manager.are_signatures_duplicate(sig, ex_sig, threshold=0.82) for ex_sig in seen_sigs):
+                    continue
+                seen_sigs.append(sig)
+            ranked_entries.append((tier, neg_sc, idx, c, sync_label, b))
+
         if not ranked_entries:
             for idx, c in enumerate(candidates[:6]):
-                ranked_entries.append((2, 0, idx, c, 0.0, None))
+                ranked_entries.append((2, 0, idx, c, "", None))
     else:
         for idx, c in enumerate(candidates[:6]):
-            ranked_entries.append((2, 0, idx, c, 0.0, None))
+            ranked_entries.append((2, 0, idx, c, "", None))
 
+    subs = []
     to_prefetch = []
-    for pos, (tier, _neg_score, idx, c, applied_off, pre_bytes) in enumerate(ranked_entries):
+    for pos, (tier, _neg_score, idx, c, sync_label, pre_bytes) in enumerate(ranked_entries[:6]):
         token = uuid.uuid4().hex[:16]
         trans = c.get("translator") or c.get("author") or ""
         prov = (c.get("provider") or "").upper()
         name = c.get("name") or c.get("release_name") or ""
         label_parts = []
-        if tier == 0:
-            label_parts.append("✅ متزامنة")
-        elif tier == 1:
-            sign = "+" if applied_off >= 0 else ""
-            label_parts.append(f"🔄 تمت المزامنة ({sign}{applied_off:.1f}s)")
+        if sync_label:
+            label_parts.append(sync_label)
         if prov:
             label_parts.append(prov)
         if trans:
@@ -792,7 +1183,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
 
         SUB_CACHE[token] = {
             "candidate": c,
-            "ref_times": ref_times,
+            "ref_data": ref_data,
             "ep_tag": ep_tag,
             "bytes": pre_bytes,
             "ts": now,
