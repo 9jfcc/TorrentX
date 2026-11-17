@@ -35,6 +35,7 @@ import subtitle_manager
 PORT = int(os.environ.get("PORT") or os.environ.get("TORRENTX_ADDON_PORT", "7123"))
 SUB_CACHE = {}  # token -> {"bytes": b"...", "ts": float, "candidate": dict, "ref_times": list}
 STREAM_META_CACHE = {}  # media_id -> {"ts": float, "items": [{"title", "release_type", "url"}]}
+REF_TIMES_CACHE = {}  # media_url -> {"ts": float, "times": list}
 
 
 def build_manifest(mode_label="Auto"):
@@ -267,11 +268,16 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
     return ranked_p2p
 
 
-def _extract_first_2min_ref_timestamps(media_url, timeout=3):
+def _extract_first_2min_ref_timestamps(media_url, timeout=5):
     """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
     if not media_url or not media_url.startswith("http"):
         return []
+
+    now = time.time()
+    cached = REF_TIMES_CACHE.get(media_url)
+    if cached and (now - cached.get("ts", 0)) < 3600:
+        return cached.get("times") or []
 
     ffprobe = shutil.which("ffprobe") or os.path.expanduser(r"~\AppData\Local\Harbor\ffprobe.exe")
     if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
@@ -281,7 +287,7 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=3):
         stream_sel = "s:0"
         probe_s = subprocess.run(
             [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", media_url],
-            capture_output=True, text=True, timeout=2, encoding="utf-8", errors="replace"
+            capture_output=True, text=True, timeout=4, encoding="utf-8", errors="replace"
         )
         if probe_s.returncode == 0 and probe_s.stdout:
             s_list = json.loads(probe_s.stdout).get("streams") or []
@@ -317,7 +323,9 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=3):
         for val in sorted(pts_list):
             if not clean or (val - clean[-1]) > 0.35:
                 clean.append(val)
-        return clean[:50]
+        result = clean[:50]
+        REF_TIMES_CACHE[media_url] = {"ts": now, "times": result}
+        return result
     except Exception:
         return []
 
@@ -335,16 +343,18 @@ def _parse_srt_first_cues(srt_text):
     return cues
 
 
-def _compute_fast_offset(ref_times, sub_times):
-    """Finds median consensus offset (ref - sub) in seconds with ~0.05s precision within [-45s, +45s]."""
+def _analyze_offset_and_inliers(ref_times, sub_times):
+    """Returns (best_offset, natural_inliers_count, synced_inliers_count, required_min)."""
     if len(ref_times) < 4 or len(sub_times) < 4:
-        return 0.0
-    best_cand = 0.0
+        return 0.0, 0, 0, 4
+    req_min = max(4, min(len(sub_times), 8) // 2)
+    nat_inliers = sum(1 for st in sub_times if min(ref_times, key=lambda rt: abs(st - rt)) and abs(st - min(ref_times, key=lambda rt: abs(st - rt))) <= 0.45)
+
     best_inliers = []
-    for r0 in ref_times[:10]:
-        for s0 in sub_times[:10]:
+    for r0 in ref_times[:12]:
+        for s0 in sub_times[:12]:
             cand = r0 - s0
-            if abs(cand) > 45.0:
+            if abs(cand) > 60.0:
                 continue
             inliers = []
             for st in sub_times:
@@ -353,13 +363,58 @@ def _compute_fast_offset(ref_times, sub_times):
                     inliers.append(closest - st)
             if len(inliers) > len(best_inliers):
                 best_inliers = inliers
-                best_cand = cand
-    if len(best_inliers) >= max(4, min(len(sub_times), 8) // 2):
+
+    if len(best_inliers) >= req_min:
         best_inliers.sort()
         median_off = best_inliers[len(best_inliers) // 2]
-        if abs(median_off) >= 0.15:
-            return round(median_off, 3)
-    return 0.0
+        off = round(median_off, 3) if abs(median_off) >= 0.15 else 0.0
+        return off, nat_inliers, len(best_inliers), req_min
+    return 0.0, nat_inliers, len(best_inliers), req_min
+
+
+def _compute_fast_offset(ref_times, sub_times):
+    """Finds median consensus offset (ref - sub) in seconds within [-60s, +60s]."""
+    off, _, synced_cnt, req_min = _analyze_offset_and_inliers(ref_times, sub_times)
+    return off if synced_cnt >= req_min else 0.0
+
+
+def _score_and_sync_subtitle(cand, ref_times):
+    """Downloads subtitle, measures natural vs shifted sync against ref_times, syncs if needed, and returns (tier, score, offset, bytes)."""
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename="sub")
+            saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
+            if not saved_path or not os.path.exists(saved_path):
+                return 3, 0, 0.0, None
+            with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = subtitle_manager.clean_subtitle_ads(f.read())
+
+            if not ref_times:
+                b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
+                return 2, 0, 0.0, b
+
+            sub_times = _parse_srt_first_cues(text)
+            off, nat_cnt, sync_cnt, req_min = _analyze_offset_and_inliers(ref_times, sub_times)
+            if nat_cnt >= req_min and abs(off) < 0.35:
+                tier = 0  # Already naturally synced
+                score = nat_cnt
+                applied_off = 0.0
+            elif sync_cnt >= req_min and hasattr(subtitle_manager, "shift_subtitle_timestamps"):
+                tier = 1  # Auto-synced by shifting
+                score = sync_cnt
+                applied_off = off
+                if off != 0.0:
+                    text = subtitle_manager.shift_subtitle_timestamps(text, off)
+            else:
+                tier = 2  # Could not verify sync against embedded ref
+                score = max(nat_cnt, sync_cnt)
+                applied_off = 0.0
+
+            b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
+            return tier, score, applied_off, b
+    except Exception:
+        return 3, 0, 0.0, None
 
 
 def _resolve_and_cache_sub(token):
@@ -547,38 +602,66 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         candidates = clean_cand
 
     candidates = candidates[:8]
+    ranked_entries = []
+
+    if not fast_mode and ref_times:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        eval_pool = candidates[:6]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futs = {pool.submit(_score_and_sync_subtitle, c, ref_times): (idx, c) for idx, c in enumerate(eval_pool)}
+            for fut in as_completed(futs):
+                idx, c = futs[fut]
+                try:
+                    tier, score, applied_off, b = fut.result()
+                except Exception:
+                    tier, score, applied_off, b = 3, 0, 0.0, None
+                if b:
+                    ranked_entries.append((tier, -score, idx, c, applied_off, b))
+        ranked_entries.sort(key=lambda x: (x[0], x[1], x[2]))
+        verified = [e for e in ranked_entries if e[0] in (0, 1)]
+        if len(verified) >= 2:
+            ranked_entries = verified[:6]
+        else:
+            ranked_entries = ranked_entries[:6]
+    else:
+        for idx, c in enumerate(candidates[:6]):
+            ranked_entries.append((2, 0, idx, c, 0.0, None))
+
     to_prefetch = []
-    for idx, c in enumerate(candidates):
+    for pos, (tier, _neg_score, idx, c, applied_off, pre_bytes) in enumerate(ranked_entries):
         token = uuid.uuid4().hex[:16]
         trans = c.get("translator") or c.get("author") or ""
         prov = (c.get("provider") or "").upper()
         name = c.get("name") or c.get("release_name") or ""
         label_parts = []
+        if tier == 0:
+            label_parts.append("✅ متزامنة")
+        elif tier == 1:
+            sign = "+" if applied_off >= 0 else ""
+            label_parts.append(f"🔄 تمت المزامنة ({sign}{applied_off:.1f}s)")
         if prov:
             label_parts.append(prov)
         if trans:
             label_parts.append(trans)
         elif name:
             label_parts.append(name[:28])
-        label = " • ".join(label_parts) if label_parts else f"Arabic #{idx+1}"
+        label = " • ".join(label_parts) if label_parts else f"Arabic #{pos+1}"
 
         SUB_CACHE[token] = {
             "candidate": c,
             "ref_times": ref_times,
-            "bytes": None,
+            "bytes": pre_bytes,
             "ts": now,
         }
         sub_url = f"{host_base}/sub_dl/{token}.srt"
-        langs_to_emit = ["ara", "ar"] if stremio_lang == "ara" else [stremio_lang]
-        for l_code in langs_to_emit:
-            subs.append({
-                "id": f"tx-{token}-{l_code}",
-                "lang": l_code,
-                "url": sub_url,
-                "SubEncoding": "UTF-8",
-                "label": f"[TorrentX] {label}",
-            })
-        if idx < 2:
+        subs.append({
+            "id": f"tx-{token}",
+            "lang": stremio_lang,
+            "url": sub_url,
+            "SubEncoding": "UTF-8",
+            "label": f"[TorrentX] {label}",
+        })
+        if pre_bytes is None and pos < 2:
             to_prefetch.append(token)
 
     def _do_prefetch():
