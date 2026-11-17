@@ -716,11 +716,11 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
 
     if not fast_mode and ref_times:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        ss_list = [c for c in candidates if (c.get("provider") or "").lower() == "subsource"][:3]
-        sd_list = [c for c in candidates if (c.get("provider") or "").lower() == "subdl"][:3]
+        ss_list = [c for c in candidates if (c.get("provider") or "").lower() == "subsource"][:2]
+        sd_list = [c for c in candidates if (c.get("provider") or "").lower() == "subdl"][:2]
         other_list = [c for c in candidates if c not in ss_list and c not in sd_list]
-        eval_pool = (ss_list + sd_list + other_list)[:6]
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        eval_pool = (ss_list + sd_list + other_list)[:4]
+        with ThreadPoolExecutor(max_workers=1) as pool:
             futs = {pool.submit(_score_and_sync_subtitle, c, ref_times, ep_tag): (idx, c) for idx, c in enumerate(eval_pool)}
             for fut in as_completed(futs):
                 idx, c = futs[fut]
