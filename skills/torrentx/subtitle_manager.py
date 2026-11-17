@@ -115,17 +115,20 @@ def clean_subtitle_ads(sub_text):
 def fix_arabic_rtl_text(sub_text):
     """
     Cleans OpenSubtitles ads/watermarks and fixes Arabic RTL punctuation & dialogue dashes
-    using Unicode RLM (\u200F) so punctuation never flips in media players.
+    using Unicode RLE (\u202B) + RLM (\u200F) + PDF (\u202C) so punctuation never flips in Stremio/MPV.
     """
     sub_text = clean_subtitle_ads(sub_text)
+    sub_text = re.sub(r"\{\\[^}]*\}", "", sub_text)
     RLM = "\u200F"
+    RLE = "\u202B"
+    PDF = "\u202C"
     lines = sub_text.splitlines()
     new_lines = []
 
     ts_pattern = re.compile(r"^\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}")
     arabic_pattern = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
     trailing_punct = re.compile(r"([.!?؟:;،,\-\'\"\)\]\}]+)$")
-    leading_punct = re.compile(r"^([.!?؟:;،,]+)([\u0600-\u06FF].*)")
+    leading_punct = re.compile(r"^([.!؟:;،,]+)\s*([\u0600-\u06FF].*)")
 
     for line in lines:
         stripped = line.strip()
@@ -140,7 +143,7 @@ def fix_arabic_rtl_text(sub_text):
         l = line.strip(" \t\u200E\u200F\u202A\u202B\u202C\u2066\u2067\u2069")
 
         m_lead = leading_punct.match(l)
-        if m_lead:
+        if m_lead and m_lead.group(1) != "...":
             punct, rest = m_lead.group(1), m_lead.group(2)
             l = f"{rest}{punct}"
 
@@ -152,7 +155,7 @@ def fix_arabic_rtl_text(sub_text):
         if trailing_punct.search(l) and not l.endswith(RLM):
             l = f"{l}{RLM}"
 
-        new_lines.append(l)
+        new_lines.append(f"{RLE}{l}{PDF}")
 
     return "\n".join(new_lines)
 
