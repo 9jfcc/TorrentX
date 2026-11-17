@@ -346,6 +346,7 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
         all_streams = probe_json.get("streams") or []
 
         duration = float(fmt_info.get("duration") or 0.0)
+        bit_rate = float(fmt_info.get("bit_rate") or 0.0)
         video_fps = 23.976
         sub_streams = []
 
@@ -388,21 +389,52 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
         if chosen_pos is None:
             return None
 
-        windows = _build_sampling_windows(duration, is_series=is_series)
-        intervals_arg = ",".join(f"{int(ws)}%+{int(we - ws)}" for ws, we in windows)
+        high_bitrate = bit_rate > 20_000_000 or (duration > 0 and float(fmt_info.get("size") or 0) / duration > 2_500_000)
+        if high_bitrate:
+            eff_dur = duration or (2520.0 if is_series else 6000.0)
+            w_start = (60.0, 90.0)
+            w_mid = (round(eff_dur * 0.38), round(eff_dur * 0.38) + 30.0)
+            windows = [w_start, w_mid]
 
-        pkt_cmd = [
-            ffprobe, "-v", "quiet", "-print_format", "json",
-            "-select_streams", f"s:{chosen_pos}",
-            "-show_packets", "-show_entries", "packet=pts_time",
-            "-read_intervals", intervals_arg,
-            direct_url,
-        ]
-        pkt_res = subprocess.run(pkt_cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
-        if pkt_res.returncode != 0 or not pkt_res.stdout:
-            return None
+            def _probe_one_win(w_tuple):
+                ws, we = w_tuple
+                cmd = [
+                    ffprobe, "-v", "quiet", "-print_format", "json",
+                    "-select_streams", f"s:{chosen_pos}",
+                    "-show_packets", "-show_entries", "packet=pts_time",
+                    "-read_intervals", f"{int(ws)}%+{int(we - ws)}",
+                    direct_url,
+                ]
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=28, encoding="utf-8", errors="replace")
+                    if res.returncode == 0 and res.stdout:
+                        return json.loads(res.stdout).get("packets") or []
+                except Exception:
+                    pass
+                return []
 
-        pkts = json.loads(pkt_res.stdout).get("packets") or []
+            from concurrent.futures import ThreadPoolExecutor
+            pkts = []
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                for res_pkts in pool.map(_probe_one_win, windows):
+                    pkts.extend(res_pkts)
+            if not pkts:
+                return None
+        else:
+            windows = _build_sampling_windows(duration, is_series=is_series)
+            intervals_arg = ",".join(f"{int(ws)}%+{int(we - ws)}" for ws, we in windows)
+
+            pkt_cmd = [
+                ffprobe, "-v", "quiet", "-print_format", "json",
+                "-select_streams", f"s:{chosen_pos}",
+                "-show_packets", "-show_entries", "packet=pts_time",
+                "-read_intervals", intervals_arg,
+                direct_url,
+            ]
+            pkt_res = subprocess.run(pkt_cmd, capture_output=True, text=True, timeout=max(timeout, 14), encoding="utf-8", errors="replace")
+            if pkt_res.returncode != 0 or not pkt_res.stdout:
+                return None
+            pkts = json.loads(pkt_res.stdout).get("packets") or []
         max_valid_t = (duration + 60.0) if duration > 0 else 14400.0
         pts_list = []
         for p in pkts:
@@ -433,7 +465,7 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
         return None
 
 
-def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=10):
+def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=22):
     """
     Multi-Window Audio VAD Fallback: Uses HTTP Range seeking (-ss before -i) across 3 windows
     (Beginning, ~Minute 11, ~Minute 23) in parallel so FPS drift and mid-episode cuts are caught even without embedded subs.
@@ -458,7 +490,7 @@ def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=10)
         return None
 
     direct_url = _resolve_redirect_url(media_url)
-    windows = [(10.0, 95.0), (640.0, 725.0), (1300.0, 1385.0)] if is_series else [(15.0, 105.0), (1200.0, 1290.0), (3000.0, 3090.0)]
+    windows = [(40.0, 75.0), (660.0, 695.0), (1320.0, 1355.0)] if is_series else [(60.0, 95.0), (1500.0, 1535.0), (3200.0, 3235.0)]
 
     def _probe_audio_window(win_tuple):
         ws, we = win_tuple
