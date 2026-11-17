@@ -340,7 +340,7 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
             ffprobe, "-v", "quiet", "-print_format", "json",
             "-show_format", "-show_streams", direct_url
         ]
-        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=6, encoding="utf-8", errors="replace")
+        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=12, encoding="utf-8", errors="replace")
         if probe_res.returncode != 0 or not probe_res.stdout:
             return None
 
@@ -810,23 +810,26 @@ def _solve_full_sync_model(ref_data, sub_cues):
             if cnt_est >= 2:
                 affine_candidates.append((a_rat, b_est))
 
-    if len(win_stats) >= 2:
+    if len(win_stats) >= 3 and ref_data.get("source") == "sub":
         for i in range(len(win_stats)):
             for j in range(i + 1, len(win_stats)):
                 t1, off1 = win_stats[i][0], win_stats[i][1]
                 t2, off2 = win_stats[j][0], win_stats[j][1]
                 if (t2 - t1) >= 250.0 and abs(off2 - off1) >= 0.45:
                     a_emp = 1.0 + (off2 - off1) / (t2 - t1)
-                    if 0.94 <= a_emp <= 1.06:
+                    if 0.95 <= a_emp <= 1.05:
                         b_emp = off1 - (a_emp - 1.0) * t1
-                        affine_candidates.append((a_emp, round(b_emp, 3)))
+                        if abs(b_emp) <= 30.0:
+                            affine_candidates.append((a_emp, round(b_emp, 3)))
 
     for a_cand, b_cand in affine_candidates:
+        if abs(b_cand) > 35.0:
+            continue
         inl, w_ok, _, _ = _evaluate_transform_across_windows(
             ref_data, sub_starts, lambda t, a=a_cand, b=b_cand: a * t + b, tol=tol
         )
         sc = inl + (w_ok * 24)
-        if w_ok >= 2 and sc > (best_model["score"] + 3):
+        if w_ok >= 2 and sc > (best_model["score"] + 5):
             best_model = {
                 "mode": "affine",
                 "a": a_cand,
