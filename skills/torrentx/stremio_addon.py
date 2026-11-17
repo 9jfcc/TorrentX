@@ -209,7 +209,6 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
         clean_title = _format_clean_stream_title(c, media_type=media_type)
         stream_obj = {
             "name": f"TorrentX\n{tier_short}\n{badge}",
-            "title": clean_title,
             "description": clean_title,
             "behaviorHints": {
                 "bingeGroup": f"torrentx-tier-{tier}",
