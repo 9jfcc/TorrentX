@@ -439,7 +439,7 @@ def _analyze_offset_and_inliers(ref_times, sub_times, tol=0.65):
     """Returns (best_offset, natural_inliers_count, synced_inliers_count, required_min)."""
     if len(ref_times) < 4 or len(sub_times) < 4:
         return 0.0, 0, 0, 4
-    req_min = max(4, min(len(sub_times), 8) // 2)
+    req_min = 2 if len(ref_times) < 20 else max(3, min(len(sub_times), 8) // 2)
     nat_inliers = sum(1 for st in sub_times if abs(st - min(ref_times, key=lambda rt: abs(st - rt))) <= tol)
 
     best_inliers = []
@@ -470,12 +470,13 @@ def _compute_fast_offset(ref_times, sub_times):
     return off if synced_cnt >= req_min else 0.0
 
 
-def _score_and_sync_subtitle(cand, ref_times):
+def _score_and_sync_subtitle(cand, ref_times, ep_tag=""):
     """Downloads subtitle, measures natural vs shifted sync against ref_times, syncs if needed, and returns (tier, score, offset, bytes)."""
     import tempfile
+    base_name = f"{ep_tag}_sub" if ep_tag else "sub"
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename="sub")
+            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename=base_name)
             saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
             if not saved_path or not os.path.exists(saved_path):
                 return 3, 0, 0.0, None
@@ -521,10 +522,12 @@ def _resolve_and_cache_sub(token):
         return None
 
     ref_times = item.get("ref_times") or []
+    ep_tag = item.get("ep_tag") or ""
+    base_name = f"{ep_tag}_{token}" if ep_tag else token
     try:
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename=token)
+            dl = subtitle_manager.download_subtitle_file(cand, tmpdir, file_basename=base_name)
             saved_path = (dl.get("file_path") or dl.get("path")) if isinstance(dl, dict) else (dl if isinstance(dl, str) else None)
             if not saved_path or not os.path.exists(saved_path):
                 return None
@@ -708,7 +711,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
                 clean_cand.append(c)
         candidates = clean_cand
 
-    candidates = candidates[:8]
+    ep_tag = f"S{int(season):02d}E{int(episode):02d}" if (season is not None and episode is not None) else ""
     ranked_entries = []
 
     if not fast_mode and ref_times:
@@ -718,7 +721,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         other_list = [c for c in candidates if c not in ss_list and c not in sd_list]
         eval_pool = (ss_list + sd_list + other_list)[:6]
         with ThreadPoolExecutor(max_workers=2) as pool:
-            futs = {pool.submit(_score_and_sync_subtitle, c, ref_times): (idx, c) for idx, c in enumerate(eval_pool)}
+            futs = {pool.submit(_score_and_sync_subtitle, c, ref_times, ep_tag): (idx, c) for idx, c in enumerate(eval_pool)}
             for fut in as_completed(futs):
                 idx, c = futs[fut]
                 try:
@@ -765,6 +768,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         SUB_CACHE[token] = {
             "candidate": c,
             "ref_times": ref_times,
+            "ep_tag": ep_tag,
             "bytes": pre_bytes,
             "ts": now,
         }
