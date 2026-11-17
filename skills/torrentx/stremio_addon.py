@@ -698,12 +698,17 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
                     tier, score, applied_off, b = 3, 0, 0.0, None
                 if b:
                     ranked_entries.append((tier, -score, idx, c, applied_off, b))
+                else:
+                    ranked_entries.append((3, 0, idx, c, 0.0, None))
         ranked_entries.sort(key=lambda x: (x[0], x[1], x[2]))
         verified = [e for e in ranked_entries if e[0] in (0, 1)]
         if len(verified) >= 2:
             ranked_entries = verified[:6]
         else:
             ranked_entries = ranked_entries[:6]
+        if not ranked_entries:
+            for idx, c in enumerate(candidates[:6]):
+                ranked_entries.append((2, 0, idx, c, 0.0, None))
     else:
         for idx, c in enumerate(candidates[:6]):
             ranked_entries.append((2, 0, idx, c, 0.0, None))
@@ -1034,23 +1039,6 @@ class AddonHandler(BaseHTTPRequestHandler):
             allow_upscale = bool((url_cfg or {}).get("allow_upscale", False))
             raw = fetch_torrentio_streams(media_type, media_id, svc_id, api_key)
             streams = format_streams(raw, mode, svc_id, media_id=media_id, allow_upscale=allow_upscale, media_type=media_type)
-
-            # Attach Arabic subtitles directly inside stream objects (fast_mode=True avoids ffprobe delay)
-            try:
-                host_base = f"http://{self.headers.get('Host') or f'127.0.0.1:{PORT}'}"
-                id_parts = media_id.split(":")
-                imdb_id = id_parts[0]
-                season = int(id_parts[1]) if len(id_parts) > 1 and id_parts[1].isdigit() else None
-                episode = int(id_parts[2]) if len(id_parts) > 2 and id_parts[2].isdigit() else None
-                subs = fetch_subtitles_for_stremio(
-                    imdb_id, host_base, season=season, episode=episode, full_media_id=media_id, url_cfg=url_cfg, fast_mode=True
-                )
-                if subs:
-                    for s in streams:
-                        s["subtitles"] = subs
-            except Exception as e:
-                logger.warning("Error attaching subs to streams: %s", e)
-
             return self._send_json({"streams": streams}, head_only=head_only)
 
         if len(parts) >= 3 and parts[0] == "subtitles":
