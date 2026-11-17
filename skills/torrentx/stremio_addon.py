@@ -189,6 +189,9 @@ def format_streams(raw_streams, mode, svc_id, media_id=None, allow_upscale=False
                 for c in candidates
             ],
         }
+        top_url = candidates[0].get("direct_url") if candidates else ""
+        if top_url and top_url.startswith("http"):
+            _prewarm_ref_data_async(top_url, is_series=(":" in str(media_id)))
 
     out = []
     for c in candidates[:25]:
@@ -394,7 +397,8 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
             eff_dur = duration or (2520.0 if is_series else 6000.0)
             w_start = (60.0, 90.0)
             w_mid = (round(eff_dur * 0.38), round(eff_dur * 0.38) + 30.0)
-            windows = [w_start, w_mid]
+            w_late = (round(eff_dur * 0.75), round(eff_dur * 0.75) + 30.0)
+            windows = [w_start, w_mid, w_late]
 
             def _probe_one_win(w_tuple):
                 ws, we = w_tuple
@@ -415,7 +419,7 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
 
             from concurrent.futures import ThreadPoolExecutor
             pkts = []
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 for res_pkts in pool.map(_probe_one_win, windows):
                     pkts.extend(res_pkts)
             if not pkts:
@@ -465,10 +469,10 @@ def _extract_multiwindow_ref_timestamps(media_url, is_series=False, timeout=11):
         return None
 
 
-def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=22):
+def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=28):
     """
-    Multi-Window Audio VAD Fallback: Uses HTTP Range seeking (-ss before -i) across 3 windows
-    (Beginning, ~Minute 11, ~Minute 23) in parallel so FPS drift and mid-episode cuts are caught even without embedded subs.
+    Multi-Window Audio VAD Fallback: Uses HTTP Range seeking (-ss before -i) across 2 strategic windows
+    with max_workers=2 so even 65 Mbps 4K BluRay Remuxes without embedded text subtitles succeed reliably.
     """
     import shutil, tempfile, wave
     if not media_url or not media_url.startswith("http"):
@@ -490,7 +494,7 @@ def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=22)
         return None
 
     direct_url = _resolve_redirect_url(media_url)
-    windows = [(40.0, 75.0), (660.0, 695.0), (1320.0, 1355.0)] if is_series else [(60.0, 95.0), (1500.0, 1535.0), (3200.0, 3235.0)]
+    windows = [(45.0, 70.0), (660.0, 685.0)] if is_series else [(150.0, 175.0), (1800.0, 1825.0)]
 
     def _probe_audio_window(win_tuple):
         ws, we = win_tuple
@@ -545,7 +549,7 @@ def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=22)
         from concurrent.futures import ThreadPoolExecutor
         all_onsets = []
         valid_windows = []
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             futs = [(w, pool.submit(_probe_audio_window, w)) for w in windows]
             for w, fut in futs:
                 w_pts = fut.result()
@@ -567,6 +571,48 @@ def _extract_audio_speech_ref_timestamps(media_url, is_series=False, timeout=22)
         return data
     except Exception:
         return None
+
+
+_REF_INFLIGHT = {}
+_REF_INFLIGHT_LOCK = threading.Lock()
+
+
+def _get_ref_data_shared(media_url, is_series=False):
+    """Deduplicates concurrent ref_data extraction between /stream/ pre-warm and /subtitles/."""
+    if not media_url or not media_url.startswith("http"):
+        return None
+    with _REF_INFLIGHT_LOCK:
+        entry = _REF_INFLIGHT.get(media_url)
+        if entry is None:
+            ev = threading.Event()
+            entry = {"ev": ev, "data": None}
+            _REF_INFLIGHT[media_url] = entry
+            is_owner = True
+        else:
+            is_owner = False
+
+    if is_owner:
+        try:
+            rd = _extract_multiwindow_ref_timestamps(media_url, is_series=is_series)
+            if not rd:
+                rd = _extract_audio_speech_ref_timestamps(media_url, is_series=is_series)
+            entry["data"] = rd
+            return rd
+        finally:
+            entry["ev"].set()
+            with _REF_INFLIGHT_LOCK:
+                if _REF_INFLIGHT.get(media_url) is entry:
+                    _REF_INFLIGHT.pop(media_url, None)
+    else:
+        entry["ev"].wait(timeout=35)
+        return entry["data"]
+
+
+def _prewarm_ref_data_async(media_url, is_series=False):
+    """Starts background reference timestamp extraction right when /stream/ is requested."""
+    if not media_url or not media_url.startswith("http"):
+        return
+    threading.Thread(target=_get_ref_data_shared, args=(media_url, is_series), daemon=True).start()
 
 
 def _parse_srt_all_cues(srt_text):
@@ -1120,8 +1166,7 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
     def _get_ref_data():
         if fast_mode or not cdn_url:
             return None
-        rd = _extract_multiwindow_ref_timestamps(cdn_url, is_series=is_series)
-        return rd if rd else _extract_audio_speech_ref_timestamps(cdn_url, is_series=is_series)
+        return _get_ref_data_shared(cdn_url, is_series=is_series)
 
     def _search_subs():
         try:
@@ -1196,13 +1241,14 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         for idx, c in enumerate(candidates[:6]):
             ranked_entries.append((2, 0, idx, c, "", None))
 
+    import html as _html
     subs = []
     to_prefetch = []
     for pos, (tier, _neg_score, idx, c, sync_label, pre_bytes) in enumerate(ranked_entries[:6]):
         token = uuid.uuid4().hex[:16]
-        trans = c.get("translator") or c.get("author") or ""
+        trans = _html.unescape(str(c.get("translator") or c.get("author") or "")).strip()
         prov = (c.get("provider") or "").upper()
-        name = c.get("name") or c.get("release_name") or ""
+        name = _html.unescape(str(c.get("name") or c.get("release_name") or "")).strip()
         label_parts = []
         if sync_label:
             label_parts.append(sync_label)
