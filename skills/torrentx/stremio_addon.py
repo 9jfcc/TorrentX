@@ -268,8 +268,20 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
     return ranked_p2p
 
 
-def _extract_first_2min_ref_timestamps(media_url, timeout=8):
-    """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
+def _resolve_redirect_url(media_url):
+    """Resolves HTTP redirects (e.g. Torrentio -> TorBox CDN) once so ffprobe/ffmpeg connect directly."""
+    if not media_url or not media_url.startswith("http"):
+        return media_url
+    try:
+        req = urllib.request.Request(media_url, method="GET", headers={"Range": "bytes=0-1", "User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.geturl() or media_url
+    except Exception:
+        return media_url
+
+
+def _extract_first_2min_ref_timestamps(media_url, timeout=10):
+    """Reads ONLY the first ~1 minute of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
     if not media_url or not media_url.startswith("http"):
         return []
@@ -283,11 +295,13 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=8):
     if not os.path.exists(ffprobe) and not shutil.which("ffprobe"):
         return []
 
+    direct_url = _resolve_redirect_url(media_url)
+
     try:
         stream_sel = "s:0"
         probe_s = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", media_url],
-            capture_output=True, text=True, timeout=4, encoding="utf-8", errors="replace"
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "s", direct_url],
+            capture_output=True, text=True, timeout=6, encoding="utf-8", errors="replace"
         )
         if probe_s.returncode == 0 and probe_s.stdout:
             s_list = json.loads(probe_s.stdout).get("streams") or []
@@ -310,7 +324,7 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=8):
             ffprobe, "-v", "quiet", "-print_format", "json",
             "-select_streams", stream_sel,
             "-show_packets", "-read_intervals", "%+60",
-            media_url,
+            direct_url,
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         if res.returncode != 0 or not res.stdout:
@@ -357,12 +371,13 @@ def _extract_audio_speech_ref_timestamps(media_url, timeout=10):
     except ImportError:
         return []
 
+    direct_url = _resolve_redirect_url(media_url)
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             wav_path = os.path.join(tmpdir, "sample.wav")
             cmd = [
                 ffmpeg, "-y", "-v", "quiet",
-                "-t", "60", "-i", media_url,
+                "-t", "60", "-i", direct_url,
                 "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
                 wav_path,
             ]
