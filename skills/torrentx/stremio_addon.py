@@ -927,6 +927,7 @@ def _do_raw_sub_download(cand, ep_tag=""):
                 return None
             with open(saved_path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 raw_text = f.read()
+            raw_text = re.sub(r"\{\\[^}]*\}", "", raw_text)
             cleaned = subtitle_manager.fix_arabic_rtl_text(raw_text)
             return cleaned if len(cleaned.strip()) > 100 else None
     except Exception:
