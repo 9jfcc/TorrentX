@@ -470,6 +470,31 @@ def _compute_fast_offset(ref_times, sub_times):
     return off if synced_cnt >= req_min else 0.0
 
 
+def _shift_srt_text(text, offset_seconds):
+    """Shifts all SRT timestamps in-memory by offset_seconds (+ delay, - advance)."""
+    if not offset_seconds or abs(offset_seconds) < 0.001:
+        return text
+    diff_ms = int(round(offset_seconds * 1000))
+
+    def _fmt(ms_val):
+        nh = ms_val // 3600000
+        nm = (ms_val % 3600000) // 60000
+        ns = (ms_val % 60000) // 1000
+        nms = ms_val % 1000
+        return f"{nh:02d}:{nm:02d}:{ns:02d},{nms:03d}"
+
+    def _shift_match(m):
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = m.groups()
+        ms_start = (int(h1) * 3600 + int(m1) * 60 + int(s1)) * 1000 + int(ms1)
+        ms_end = (int(h2) * 3600 + int(m2) * 60 + int(s2)) * 1000 + int(ms2)
+        new_start = max(0, ms_start + diff_ms)
+        new_end = max(new_start + 500, ms_end + diff_ms)
+        return f"{_fmt(new_start)} --> {_fmt(new_end)}"
+
+    pattern = r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+    return re.sub(pattern, _shift_match, text)
+
+
 def _score_and_sync_subtitle(cand, ref_times, ep_tag=""):
     """Downloads subtitle, measures natural vs shifted sync against ref_times, syncs if needed, and returns (tier, score, offset, bytes)."""
     import tempfile
@@ -493,12 +518,12 @@ def _score_and_sync_subtitle(cand, ref_times, ep_tag=""):
                 tier = 0  # Already naturally synced
                 score = nat_cnt
                 applied_off = 0.0
-            elif sync_cnt >= req_min and hasattr(subtitle_manager, "shift_subtitle_timestamps"):
+            elif sync_cnt >= req_min:
                 tier = 1  # Auto-synced by shifting
                 score = sync_cnt
                 applied_off = off
                 if off != 0.0:
-                    text = subtitle_manager.shift_subtitle_timestamps(text, off)
+                    text = _shift_srt_text(text, off)
             else:
                 tier = 2  # Could not verify sync against embedded ref
                 score = max(nat_cnt, sync_cnt)
@@ -534,11 +559,11 @@ def _resolve_and_cache_sub(token):
             with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = subtitle_manager.clean_subtitle_ads(f.read())
 
-            if ref_times and hasattr(subtitle_manager, "shift_subtitle_timestamps"):
+            if ref_times:
                 sub_times = _parse_srt_first_cues(text)
                 offset = _compute_fast_offset(ref_times, sub_times)
                 if offset != 0.0:
-                    text = subtitle_manager.shift_subtitle_timestamps(text, offset)
+                    text = _shift_srt_text(text, offset)
 
             # UTF-8 with BOM helps MPV/Windows players detect Arabic encoding reliably
             b = ("\ufeff" + text.lstrip("\ufeff")).encode("utf-8")
