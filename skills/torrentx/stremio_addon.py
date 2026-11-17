@@ -291,14 +291,20 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=5):
         )
         if probe_s.returncode == 0 and probe_s.stdout:
             s_list = json.loads(probe_s.stdout).get("streams") or []
+            bitmap_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+            best_idx = None
             for idx, st in enumerate(s_list):
+                codec = str(st.get("codec_name") or "").lower()
                 tags = st.get("tags") or {}
-                lang = str(tags.get("language") or "").lower()
                 title = str(tags.get("title") or "").lower()
                 forced = (st.get("disposition") or {}).get("forced") == 1 or "forced" in title
-                if not forced and lang in ("eng", "en", "und", ""):
-                    stream_sel = f"s:{idx}"
-                    break
+                if forced or codec in bitmap_codecs:
+                    continue
+                best_idx = idx
+                break
+            if best_idx is None:
+                return []
+            stream_sel = f"s:{best_idx}"
 
         cmd = [
             ffprobe, "-v", "quiet", "-print_format", "json",
@@ -326,6 +332,77 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=5):
         result = clean[:50]
         REF_TIMES_CACHE[media_url] = {"ts": now, "times": result}
         return result
+    except Exception:
+        return []
+
+
+def _extract_audio_speech_ref_timestamps(media_url, timeout=10):
+    """Fallback when video has no embedded text subtitles: extracts first 3 min of audio via ffmpeg and detects speech onsets via ffsubsync's webrtcvad."""
+    import shutil, tempfile, wave
+    if not media_url or not media_url.startswith("http"):
+        return []
+
+    now = time.time()
+    cache_key = f"aud:{media_url}"
+    cached = REF_TIMES_CACHE.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) < 3600:
+        return cached.get("times") or []
+
+    ffmpeg = shutil.which("ffmpeg") or os.path.expanduser(r"~\AppData\Local\Harbor\ffmpeg.exe")
+    if not os.path.exists(ffmpeg) and not shutil.which("ffmpeg"):
+        return []
+
+    try:
+        import webrtcvad
+    except ImportError:
+        return []
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = os.path.join(tmpdir, "sample.wav")
+            cmd = [
+                ffmpeg, "-y", "-v", "quiet",
+                "-t", "180", "-i", media_url,
+                "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
+                wav_path,
+            ]
+            res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            if res.returncode != 0 or not os.path.exists(wav_path):
+                return []
+
+            vad = webrtcvad.Vad(2)
+            frame_ms = 30
+            frame_bytes = int(16000 * (frame_ms / 1000.0) * 2)
+            speech_onsets = []
+            in_speech = False
+            speech_run = 0
+            silence_run = 0
+
+            with wave.open(wav_path, "rb") as wf:
+                t_sec = 0.0
+                while True:
+                    buf = wf.readframes(frame_bytes // 2)
+                    if len(buf) < frame_bytes:
+                        break
+                    is_sp = vad.is_speech(buf, 16000)
+                    if is_sp:
+                        speech_run += 1
+                        silence_run = 0
+                        if not in_speech and speech_run >= 4 and t_sec >= 1.0:
+                            in_speech = True
+                            onset = round(t_sec - (3 * frame_ms / 1000.0), 3)
+                            if not speech_onsets or (onset - speech_onsets[-1]) > 0.5:
+                                speech_onsets.append(onset)
+                    else:
+                        silence_run += 1
+                        speech_run = 0
+                        if in_speech and silence_run >= 10:
+                            in_speech = False
+                    t_sec += frame_ms / 1000.0
+
+            result = speech_onsets[:50]
+            REF_TIMES_CACHE[cache_key] = {"ts": now, "times": result}
+            return result
     except Exception:
         return []
 
@@ -563,8 +640,12 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         release_type = chosen.get("release_type")
         cdn_url = chosen.get("url")
 
-    # Avoid blocking /stream/ requests with ffprobe network calls when fast_mode=True
-    ref_times = [] if fast_mode else (_extract_first_2min_ref_timestamps(cdn_url) if cdn_url else [])
+    # Avoid blocking /stream/ requests with ffprobe/ffmpeg network calls when fast_mode=True
+    ref_times = []
+    if not fast_mode and cdn_url:
+        ref_times = _extract_first_2min_ref_timestamps(cdn_url)
+        if not ref_times:
+            ref_times = _extract_audio_speech_ref_timestamps(cdn_url)
 
     query_title = imdb_id
     try:
