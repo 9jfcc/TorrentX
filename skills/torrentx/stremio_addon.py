@@ -362,7 +362,7 @@ def _extract_audio_speech_ref_timestamps(media_url, timeout=10):
             wav_path = os.path.join(tmpdir, "sample.wav")
             cmd = [
                 ffmpeg, "-y", "-v", "quiet",
-                "-t", "180", "-i", media_url,
+                "-t", "120", "-i", media_url,
                 "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
                 wav_path,
             ]
@@ -420,12 +420,12 @@ def _parse_srt_first_cues(srt_text):
     return cues
 
 
-def _analyze_offset_and_inliers(ref_times, sub_times):
+def _analyze_offset_and_inliers(ref_times, sub_times, tol=0.65):
     """Returns (best_offset, natural_inliers_count, synced_inliers_count, required_min)."""
     if len(ref_times) < 4 or len(sub_times) < 4:
         return 0.0, 0, 0, 4
     req_min = max(4, min(len(sub_times), 8) // 2)
-    nat_inliers = sum(1 for st in sub_times if min(ref_times, key=lambda rt: abs(st - rt)) and abs(st - min(ref_times, key=lambda rt: abs(st - rt))) <= 0.45)
+    nat_inliers = sum(1 for st in sub_times if abs(st - min(ref_times, key=lambda rt: abs(st - rt))) <= tol)
 
     best_inliers = []
     for r0 in ref_times[:12]:
@@ -436,7 +436,7 @@ def _analyze_offset_and_inliers(ref_times, sub_times):
             inliers = []
             for st in sub_times:
                 closest = min(ref_times, key=lambda rt: abs((st + cand) - rt))
-                if abs((st + cand) - closest) <= 0.45:
+                if abs((st + cand) - closest) <= tol:
                     inliers.append(closest - st)
             if len(inliers) > len(best_inliers):
                 best_inliers = inliers
