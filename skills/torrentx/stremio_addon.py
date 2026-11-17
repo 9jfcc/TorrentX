@@ -268,7 +268,7 @@ def _rank_all_candidates(raw_streams, mode, allow_upscale=False):
     return ranked_p2p
 
 
-def _extract_first_2min_ref_timestamps(media_url, timeout=5):
+def _extract_first_2min_ref_timestamps(media_url, timeout=8):
     """Reads ONLY the first ~3 minutes of the best non-forced embedded subtitle PTS timestamps from an HTTP CDN URL."""
     import shutil
     if not media_url or not media_url.startswith("http"):
@@ -309,7 +309,7 @@ def _extract_first_2min_ref_timestamps(media_url, timeout=5):
         cmd = [
             ffprobe, "-v", "quiet", "-print_format", "json",
             "-select_streams", stream_sel,
-            "-show_packets", "-read_intervals", "%+180",
+            "-show_packets", "-read_intervals", "%+60",
             media_url,
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
@@ -362,7 +362,7 @@ def _extract_audio_speech_ref_timestamps(media_url, timeout=10):
             wav_path = os.path.join(tmpdir, "sample.wav")
             cmd = [
                 ffmpeg, "-y", "-v", "quiet",
-                "-t", "120", "-i", media_url,
+                "-t", "60", "-i", media_url,
                 "-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
                 wav_path,
             ]
@@ -640,13 +640,6 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
         release_type = chosen.get("release_type")
         cdn_url = chosen.get("url")
 
-    # Avoid blocking /stream/ requests with ffprobe/ffmpeg network calls when fast_mode=True
-    ref_times = []
-    if not fast_mode and cdn_url:
-        ref_times = _extract_first_2min_ref_timestamps(cdn_url)
-        if not ref_times:
-            ref_times = _extract_audio_speech_ref_timestamps(cdn_url)
-
     query_title = imdb_id
     try:
         _, canonical_title, _ = debrid_manager.resolve_movie_identity(imdb_id)
@@ -662,17 +655,35 @@ def fetch_subtitles_for_stremio(imdb_id, host_base, season=None, episode=None, f
     target_lang = (url_cfg or {}).get("sub_lang") or "ar"
     stremio_lang = "ara" if target_lang == "ar" else ("eng" if target_lang == "en" else target_lang)
 
+    def _get_ref_times():
+        if fast_mode or not cdn_url:
+            return []
+        rt = _extract_first_2min_ref_timestamps(cdn_url)
+        return rt if rt else _extract_audio_speech_ref_timestamps(cdn_url)
+
+    def _search_subs():
+        try:
+            res = subtitle_manager.search_all_subtitles(
+                query_title, imdb_id=imdb_id, lang=target_lang, release_type=release_type,
+                season=season, episode=episode,
+                subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
+            )
+            return res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
+        except Exception as e:
+            logger.warning("Subtitle search error for %s: %s", imdb_id, e)
+            return []
+
     subs = []
-    try:
-        res = subtitle_manager.search_all_subtitles(
-            query_title, imdb_id=imdb_id, lang=target_lang, release_type=release_type,
-            season=season, episode=episode,
-            subdl_key=subdl_key, subsource_key=subsource_key, wyzie_key=wyzie_key,
-        )
-        candidates = res if isinstance(res, list) else (res.get("ranked_subtitles") or res.get("results") or [])
-    except Exception as e:
-        logger.warning("Subtitle search error for %s: %s", imdb_id, e)
-        candidates = []
+    if not fast_mode and cdn_url:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_ref = pool.submit(_get_ref_times)
+            f_sub = pool.submit(_search_subs)
+            ref_times = f_ref.result()
+            candidates = f_sub.result()
+    else:
+        ref_times = []
+        candidates = _search_subs()
 
     if target_lang == "ar":
         clean_cand = []
