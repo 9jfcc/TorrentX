@@ -1300,10 +1300,49 @@ def check_timing_against_reference(sub_path, ref_sub_path):
     return is_matched, round(peak_e, 2), round(drift, 2)
 
 
+def _get_lapse_bin():
+    skill_dir = os.path.dirname(os.path.abspath(__file__))
+    for candidate in [
+        shutil.which("lapse"),
+        os.path.join(skill_dir, "bin", "lapse", "lapse.exe"),
+        os.path.expanduser(r"~\Downloads\AutoSubSync\_internal\resources\lapse\lapse.exe"),
+    ]:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _get_ffsubsync_bin():
+    for candidate in [
+        shutil.which("ffsubsync"),
+        os.path.expanduser(r"~\AppData\Local\Programs\Python\Python313\Scripts\ffsubsync.exe"),
+        os.path.expanduser(r"~\AppData\Local\Programs\Python\Python311\Scripts\ffsubsync.EXE"),
+    ]:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _get_autosubsync_bin():
+    for candidate in [
+        shutil.which("autosubsync"),
+        shutil.which("subsync"),
+        os.path.expanduser(r"~\AppData\Local\Programs\Python\Python311\Scripts\subsync.exe"),
+    ]:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def sync_subtitle_with_alass(video_path, subtitle_path, output_path=None, ref_sub_path=None):
     """
-    Synchronizes subtitle using alass (Priority 1), falling back to ffsubsync / AutoSubSync if needed.
-    If ref_sub_path is provided (or can be extracted from video_path), alass aligns in <1s with 100% accuracy!
+    Synchronizes subtitle using a verified multi-tool waterfall:
+    1. alass (Priority 1)
+    2. lapse (Fallback if alass fails or fails post-sync verification)
+    3. ffsubsync (Fallback)
+    4. autosubsync / subsync (Fallback)
+    If ref_sub_path is provided (or can be extracted from video_path), verifies timing after each tool
+    and picks the first verified match (or the lowest-error candidate across all tools).
     """
     if not output_path:
         base, ext = os.path.splitext(subtitle_path)
@@ -1317,80 +1356,196 @@ def sync_subtitle_with_alass(video_path, subtitle_path, output_path=None, ref_su
         ref_sub_path = extract_embedded_reference_sub(video_path)
         cleanup_ref = True
 
+    def _cleanup_ref_file():
+        if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
+            try:
+                os.remove(ref_sub_path)
+            except Exception:
+                pass
+
     # Fast check: Is the subtitle ALREADY perfectly synced (<0.45s offset, <0.25s drift)?
     if ref_sub_path and os.path.exists(ref_sub_path):
         is_matched, offset_s, drift_s = check_timing_against_reference(subtitle_path, ref_sub_path)
         if is_matched:
             shutil.copy2(subtitle_path, output_path)
-            if cleanup_ref and os.path.exists(ref_sub_path):
-                try:
-                    os.remove(ref_sub_path)
-                except Exception:
-                    pass
+            _cleanup_ref_file()
             return {
                 "success": True,
                 "output_file": output_path,
                 "tool": "already_matched",
                 "shift_seconds": offset_s,
                 "drift_seconds": drift_s,
+                "verified_matched": True,
+                "post_offset_seconds": offset_s,
+                "post_drift_seconds": drift_s,
                 "message": f"التوقيت متطابق مسبقاً بدقة عالية (الفرق {offset_s:+.2f} ثانية)"
             }
 
-    # Run alass
+    sync_source = ref_sub_path if (ref_sub_path and os.path.exists(ref_sub_path)) else video_path
+    ref_type = "embedded_sub" if (ref_sub_path and os.path.exists(ref_sub_path)) else "audio"
+    orig_first, _, _ = parse_sub_timestamps(subtitle_path)
+    base_out, ext_out = os.path.splitext(output_path)
+
+    best_candidate = None
+    tools_tried = []
+
+    def _evaluate_candidate(tool_name, cand_path):
+        nonlocal best_candidate
+        if not os.path.exists(cand_path) or os.path.getsize(cand_path) <= 1000:
+            return False
+        convert_to_utf8_bom(cand_path, apply_rtl_fix=True)
+        synced_first, _, _ = parse_sub_timestamps(cand_path)
+        shift = round((synced_first or 0) - (orig_first or 0), 2) if (orig_first is not None and synced_first is not None) else 0.0
+        if ref_sub_path and os.path.exists(ref_sub_path):
+            post_matched, post_offset, post_drift = check_timing_against_reference(cand_path, ref_sub_path)
+        else:
+            post_matched, post_offset, post_drift = (True, 0.0, 0.0)
+        score = abs(post_offset) + abs(post_drift)
+        cand_info = {
+            "tool": tool_name,
+            "path": cand_path,
+            "shift_seconds": shift,
+            "verified_matched": post_matched,
+            "post_offset_seconds": post_offset,
+            "post_drift_seconds": post_drift,
+            "score": score,
+        }
+        if best_candidate is None or score < best_candidate["score"]:
+            if best_candidate and best_candidate["path"] != cand_path and os.path.exists(best_candidate["path"]):
+                try:
+                    os.remove(best_candidate["path"])
+                except Exception:
+                    pass
+            best_candidate = cand_info
+        elif os.path.exists(cand_path):
+            try:
+                os.remove(cand_path)
+            except Exception:
+                pass
+        return post_matched
+
+    # 1. Tool 1: alass
     alass_bin = get_alass_bin()
     if alass_bin:
+        tools_tried.append("alass")
+        cand_alass = f"{base_out}.alass{ext_out}"
         try:
-            sync_source = ref_sub_path if (ref_sub_path and os.path.exists(ref_sub_path)) else video_path
-            cmd = [alass_bin, sync_source, subtitle_path, output_path]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                convert_to_utf8_bom(output_path, apply_rtl_fix=True)
-                orig_first, _, _ = parse_sub_timestamps(subtitle_path)
-                synced_first, _, _ = parse_sub_timestamps(output_path)
-                shift = round((synced_first or 0) - (orig_first or 0), 2) if (orig_first is not None and synced_first is not None) else 0.0
-                post_matched, post_offset, post_drift = (True, 0.0, 0.0)
-                if ref_sub_path and os.path.exists(ref_sub_path):
-                    post_matched, post_offset, post_drift = check_timing_against_reference(output_path, ref_sub_path)
-                if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
-                    try:
-                        os.remove(ref_sub_path)
-                    except Exception:
-                        pass
+            subprocess.run([alass_bin, sync_source, subtitle_path, cand_alass], capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
+            if _evaluate_candidate("alass", cand_alass):
+                shutil.move(best_candidate["path"], output_path)
+                _cleanup_ref_file()
                 return {
                     "success": True,
                     "output_file": output_path,
                     "tool": "alass",
-                    "shift_seconds": shift,
-                    "ref_type": "embedded_sub" if ref_sub_path else "audio",
-                    "verified_matched": post_matched,
-                    "post_offset_seconds": post_offset,
-                    "post_drift_seconds": post_drift
+                    "shift_seconds": best_candidate["shift_seconds"],
+                    "ref_type": ref_type,
+                    "verified_matched": True,
+                    "post_offset_seconds": best_candidate["post_offset_seconds"],
+                    "post_drift_seconds": best_candidate["post_drift_seconds"],
+                    "tools_tried": tools_tried
                 }
-            if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
-                try:
-                    os.remove(ref_sub_path)
-                except Exception:
-                    pass
-        except Exception:
-            if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
-                try:
-                    os.remove(ref_sub_path)
-                except Exception:
-                    pass
-
-    # Fallback: ffsubsync
-    ffs_bin = shutil.which("ffsubsync") or os.path.expanduser(r"~\AppData\Local\Programs\Python\Python311\Scripts\ffsubsync.EXE")
-    if ffs_bin and os.path.exists(ffs_bin):
-        try:
-            cmd = [ffs_bin, video_path, "-i", subtitle_path, "-o", output_path, "--max-duration-seconds", "180"]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                convert_to_utf8_bom(output_path, apply_rtl_fix=True)
-                return {"success": True, "output_file": output_path, "tool": "ffsubsync"}
         except Exception:
             pass
 
-    return {"error": True, "message": "تعذر ضبط التوقيت عبر alass"}
+    # 2. Tool 2: lapse (AutoSubSync bundled engine)
+    lapse_bin = _get_lapse_bin()
+    if lapse_bin:
+        tools_tried.append("lapse")
+        cand_lapse = f"{base_out}.lapse{ext_out}"
+        try:
+            subprocess.run(
+                [lapse_bin, sync_source, subtitle_path, "auto", "--output", cand_lapse, "--no-backup", "--no-sidecar", "--encoding", "utf8-bom", "--quiet"],
+                capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
+            )
+            if _evaluate_candidate("lapse", cand_lapse):
+                shutil.move(best_candidate["path"], output_path)
+                _cleanup_ref_file()
+                return {
+                    "success": True,
+                    "output_file": output_path,
+                    "tool": "lapse",
+                    "shift_seconds": best_candidate["shift_seconds"],
+                    "ref_type": ref_type,
+                    "verified_matched": True,
+                    "post_offset_seconds": best_candidate["post_offset_seconds"],
+                    "post_drift_seconds": best_candidate["post_drift_seconds"],
+                    "tools_tried": tools_tried
+                }
+        except Exception:
+            pass
+
+    # 3. Tool 3: ffsubsync
+    ffs_bin = _get_ffsubsync_bin()
+    if ffs_bin:
+        tools_tried.append("ffsubsync")
+        cand_ffs = f"{base_out}.ffsubsync{ext_out}"
+        try:
+            subprocess.run(
+                [ffs_bin, sync_source, "-i", subtitle_path, "-o", cand_ffs, "--max-duration-seconds", "180"],
+                capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
+            )
+            if _evaluate_candidate("ffsubsync", cand_ffs):
+                shutil.move(best_candidate["path"], output_path)
+                _cleanup_ref_file()
+                return {
+                    "success": True,
+                    "output_file": output_path,
+                    "tool": "ffsubsync",
+                    "shift_seconds": best_candidate["shift_seconds"],
+                    "ref_type": ref_type,
+                    "verified_matched": True,
+                    "post_offset_seconds": best_candidate["post_offset_seconds"],
+                    "post_drift_seconds": best_candidate["post_drift_seconds"],
+                    "tools_tried": tools_tried
+                }
+        except Exception:
+            pass
+
+    # 4. Tool 4: autosubsync / subsync
+    auto_bin = _get_autosubsync_bin()
+    if auto_bin:
+        tools_tried.append("autosubsync")
+        cand_auto = f"{base_out}.autosubsync{ext_out}"
+        try:
+            subprocess.run(
+                [auto_bin, video_path, subtitle_path, cand_auto],
+                capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
+            )
+            if _evaluate_candidate("autosubsync", cand_auto):
+                shutil.move(best_candidate["path"], output_path)
+                _cleanup_ref_file()
+                return {
+                    "success": True,
+                    "output_file": output_path,
+                    "tool": "autosubsync",
+                    "shift_seconds": best_candidate["shift_seconds"],
+                    "ref_type": ref_type,
+                    "verified_matched": True,
+                    "post_offset_seconds": best_candidate["post_offset_seconds"],
+                    "post_drift_seconds": best_candidate["post_drift_seconds"],
+                    "tools_tried": tools_tried
+                }
+        except Exception:
+            pass
+
+    _cleanup_ref_file()
+
+    if best_candidate and os.path.exists(best_candidate["path"]):
+        shutil.move(best_candidate["path"], output_path)
+        return {
+            "success": True,
+            "output_file": output_path,
+            "tool": best_candidate["tool"],
+            "shift_seconds": best_candidate["shift_seconds"],
+            "ref_type": ref_type,
+            "verified_matched": best_candidate["verified_matched"],
+            "post_offset_seconds": best_candidate["post_offset_seconds"],
+            "post_drift_seconds": best_candidate["post_drift_seconds"],
+            "tools_tried": tools_tried
+        }
+
+    return {"error": True, "message": f"تعذر ضبط التوقيت عبر الأدوات ({', '.join(tools_tried)})"}
 
 
 # Keep backwards-compatible alias

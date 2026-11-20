@@ -40,9 +40,10 @@ What `fast-movie` does automatically in **~2–4 seconds**:
    - **Movies:** Saved directly in `<BestDrive>\Movies\` (**no** per-movie subfolder).
    - **Single Episode:** Saved directly in `<BestDrive>\Series\` (**no** subfolder).
    - **Full Series / Season Pack:** Saved inside `<BestDrive>\Series\<Title>\Season XX\` (**creates** a dedicated folder).
-6. **Automatic `alass` Timing Sync, Verification & MKV Muxing:**
+6. **Automatic Multi-Tool Timing Sync, Verification & MKV Muxing:**
    - Spawns `subtitle_manager.py watch-and-sync` detached via `Win32_Process` so it survives session exit.
-   - As soon as the movie finishes downloading, it extracts the ground-truth embedded reference subtitle (`.ref_eng.srt` from text tracks OR Blu-ray PGS `.sup`), runs **`alass`** to fix any timing offset/drift, **verifies** post-sync alignment (`verified_matched`), applies UTF-8 BOM + Arabic RTL punctuation fixes (`fix_arabic_rtl_file`), and losslessly muxes all tracks into the MKV container via `mkvmerge` or **`ffmpeg` fallback**, verifying the embedded Arabic tracks with `ffprobe`.
+   - As soon as the movie finishes downloading, it extracts the ground-truth embedded reference subtitle (`.ref_eng.srt` from text tracks OR Blu-ray PGS `.sup`), runs **`alass`** and **verifies** post-sync alignment (`verified_matched`). If `alass` fails to achieve a verified match, it automatically falls back through **`lapse` -> `ffsubsync` -> `autosubsync`** and selects the best verified result.
+   - Applies UTF-8 BOM + Arabic RTL punctuation fixes (`fix_arabic_rtl_file`), losslessly muxes all tracks into the MKV container via `mkvmerge` or **`ffmpeg` fallback**, verifies the embedded Arabic tracks with `ffprobe`, and cleans up temporary `.srt`/`.sync.log` files.
 
 ---
 
