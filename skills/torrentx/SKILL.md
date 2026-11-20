@@ -5,7 +5,14 @@ description: High-speed, intelligent movie and media download suite with TorBox/
 
 # 🎬 TorrentX High-Speed & Smart Movie Protocol
 
-Whenever the user asks to download a movie (e.g., `حمل لي فلم ...`, `نزل فلم ...`), execute the **Fast Movie-First Protocol** immediately using `debrid_manager.py` and `subtitle_manager.py`.
+Whenever the user asks to download a movie (e.g., `حمل لي فلم ...`, `نزل فلم ...`), execute the **Fast Movie-First Protocol** immediately using `debrid_manager.py`.
+
+> [!IMPORTANT]
+> **STRICT SPEED RULE (Applies to ALL models, especially Gemini 3.8 / Pro models):**
+> - **Execute in ONE single step — NO extra checks, NO tests, NO code reading!**
+> - Do **NOT** read `debrid_manager.py`, `subtitle_manager.py`, or `movies.md` before running `fast-movie` (unless the user explicitly asks to edit the skill).
+> - Do **NOT** run `search-movie`, `check-embedded`, `smart-fetch`, `Get-PSDrive`, `ffprobe`, `py_compile`, or any manual verification tests — `fast-movie` already performs best-drive selection, 4-tier anti-upscale selection, Aria2 download, embedded subtitle check, SubSource/SubDL fetching, detached multi-tool sync (`alass` -> `lapse` -> `ffsubsync` -> `autosubsync`), MKV muxing, and cleanup automatically.
+> - If the user requests **multiple movies** (e.g., 5 movies), launch `fast-movie` for all of them in **parallel in one turn** (or a single PowerShell background/parallel loop), read the JSON output, report `selected_drive`, `drive_free_gb`, `output_dir`, `target_video_path`, selected release, and subtitles, and **stop immediately**.
 
 ---
 
