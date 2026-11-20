@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 import sys
 import json
@@ -435,8 +435,8 @@ def get_media_output_dir(media_type="movie", title=None, year=None, season=None,
     return base_dir
 
 
-def _launch_detached_win32(cmd):
-    """Launches a process detached from Windows Job Objects via Win32_Process Create."""
+def _launch_detached_win32(cmd, hidden=True):
+    """Launches a process detached from Windows Job Objects via Win32_Process Create (hidden by default)."""
     if sys.platform != "win32":
         return False
     try:
@@ -448,9 +448,18 @@ def _launch_detached_win32(cmd):
                 escaped_args.append(arg)
         raw_cli = ' '.join(escaped_args)
         b64_cli = __import__('base64').b64encode(raw_cli.encode('utf-8')).decode('ascii')
+        if hidden:
+            ps_script = (
+                "$si = New-CimInstance -ClassName Win32_ProcessStartup -Property @{ShowWindow = [uint16]0} -ClientOnly; "
+                f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64_cli}')); ProcessStartupInformation = $si}}"
+            )
+        else:
+            ps_script = (
+                f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64_cli}'))}}"
+            )
         ps_cmd = [
             "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-            f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64_cli}'))}}"
+            ps_script
         ]
         res = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=5)
         return ("ProcessId" in res.stdout or "ReturnValue" in res.stdout)
@@ -525,7 +534,9 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
 
         if not launched:
             if sys.platform == "win32":
-                subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                CREATE_NO_WINDOW = 0x08000000
+                DETACHED_PROCESS = 0x00000008
+                subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS, close_fds=True)
             else:
                 subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
