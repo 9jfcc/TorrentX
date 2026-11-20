@@ -2457,6 +2457,20 @@ def _solve_stream_sync_model(ref_data, sub_cues):
             if sc <= (nat_score + 20.0) or t_inl < (nat_t_inl + 3):
                 continue
 
+        if source != "local_srt" and abs(b_cand) > 2.0:
+            req_big_t = max(7, int(0.40 * len(ref_times)))
+            req_big_l = max(10, int(0.55 * len(ref_times)))
+            if (
+                w_ok < max(2, active_wins - 1)
+                or t_inl < req_big_t
+                or inl < req_big_l
+                or r_ms is None
+                or r_ms > 190.0
+            ):
+                continue
+            if nat_win_ok >= max(2, active_wins - 1) and sc <= (nat_score + 25.0):
+                continue
+
         if w_ok >= min(2, active_wins) and inl >= nat_inliers:
             if w_ok == active_wins and abs(b_cand) <= 0.12 and nat_win_ok == active_wins and nat_score >= (sc - 2.0):
                 if best_model["score"] <= nat_score:
@@ -2593,7 +2607,7 @@ def _solve_stream_sync_model(ref_data, sub_cues):
                     "label": "🔄 تمت المزامنة (ضبط FPS + التوقيت)",
                 }
 
-        if is_sub_ref and len(win_stats) >= 2 and best_model.get("win_ok", 0) < len(win_stats):
+        if is_sub_ref and (source == "local_srt" or len(ref_times) >= 40) and len(win_stats) >= 2 and best_model.get("win_ok", 0) < len(win_stats):
             offsets_seq = [w[1] for w in win_stats]
             if (max(offsets_seq) - min(offsets_seq)) >= 0.60:
                 segments = []
@@ -2698,7 +2712,8 @@ def _apply_stream_sync_model(srt_text, model):
 def solve_and_apply_stream_sync(sub_paths, ref_data):
     """
     Applies the multi-window sync model (Natural / Constant / FPS Affine / Piecewise)
-    + bulletproof Arabic RTL un-reverser across all downloaded stream subtitles.
+    + cross-subtitle dense peer refinement + bulletproof Arabic RTL un-reverser
+    across all downloaded stream subtitles.
     """
     if isinstance(sub_paths, str):
         sub_paths = [sub_paths]
@@ -2706,7 +2721,14 @@ def solve_and_apply_stream_sync(sub_paths, ref_data):
     if not sub_paths:
         return {"synced": False, "reason": "no_subtitles", "details": []}
 
-    details = []
+    empty_model = {
+        "mode": "none", "a": 1.0, "b": 0.0, "tier": 2,
+        "win_ok": 0, "active_windows": 0, "tight_inliers": 0,
+        "post_inliers": 0, "median_residual_ms": None, "label": ""
+    }
+
+    # Pass 1: Clean RTL, parse cues, and solve each subtitle against stream ref_data
+    entries = []
     for sp in sub_paths:
         raw_text = None
         for enc in ("utf-8-sig", "utf-8", "windows-1256", "cp1256", "iso-8859-6"):
@@ -2717,19 +2739,98 @@ def solve_and_apply_stream_sync(sub_paths, ref_data):
             except Exception:
                 continue
         if not raw_text:
-            details.append({"file": os.path.basename(sp), "path": sp, "mode": "unreadable", "tier": 2, "win_ok": 0})
+            entries.append({"path": sp, "unreadable": True, "model": dict(empty_model, mode="unreadable")})
             continue
 
         cleaned_text = fix_arabic_rtl_text(raw_text)
         cues = _parse_srt_all_cues_from_text(cleaned_text)
-        model = _solve_stream_sync_model(ref_data, cues) if (ref_data and ref_data.get("times")) else {
-            "mode": "none", "a": 1.0, "b": 0.0, "tier": 2, "win_ok": 0, "active_windows": 0, "post_inliers": 0, "median_residual_ms": None, "label": ""
-        }
+        model = _solve_stream_sync_model(ref_data, cues) if (ref_data and ref_data.get("times")) else dict(empty_model)
+        entries.append({
+            "path": sp,
+            "unreadable": False,
+            "cleaned_text": cleaned_text,
+            "cues": cues,
+            "model": model,
+        })
+
+    # Pass 2: Cross-Subtitle Dense Peer Refinement
+    # If any subtitle locked strongly onto the stream cues, build a 5-window dense (~200+ cue)
+    # reference from it to rescue/refine any subtitle that had sparse overlap or tier 2.
+    n_stream_cues = len((ref_data or {}).get("times") or [])
+    if ref_data and n_stream_cues >= 5:
+        anchor_candidates = []
+        for idx, ent in enumerate(entries):
+            if ent["unreadable"]:
+                continue
+            m = ent["model"]
+            aw = max(1, m.get("active_windows", 0))
+            if (
+                m.get("tier") in (0, 1)
+                and m.get("win_ok", 0) == aw
+                and m.get("tight_inliers", 0) >= max(5, int(0.40 * n_stream_cues))
+                and m.get("post_inliers", 0) >= max(7, int(0.50 * n_stream_cues))
+                and (m.get("median_residual_ms") or 999) <= 180.0
+            ):
+                anchor_candidates.append((m.get("tight_inliers", 0), m.get("post_inliers", 0), -(m.get("median_residual_ms") or 999), idx))
+
+        if anchor_candidates:
+            anchor_candidates.sort(reverse=True)
+            anchor_idx = anchor_candidates[0][3]
+            anchor_ent = entries[anchor_idx]
+            anchor_synced_txt = (
+                _apply_stream_sync_model(anchor_ent["cleaned_text"], anchor_ent["model"])
+                if anchor_ent["model"].get("tier") in (0, 1)
+                else anchor_ent["cleaned_text"]
+            )
+            try:
+                import tempfile
+                with tempfile.NamedTemporaryFile("w", suffix=".srt", encoding="utf-8-sig", delete=False) as tf:
+                    tf.write(anchor_synced_txt)
+                    tmp_anchor_path = tf.name
+                try:
+                    dense_ref = _build_local_ref_data_from_srt(tmp_anchor_path)
+                finally:
+                    try:
+                        os.remove(tmp_anchor_path)
+                    except Exception:
+                        pass
+
+                if dense_ref and len(dense_ref.get("times", [])) >= 40:
+                    for idx, ent in enumerate(entries):
+                        if idx == anchor_idx or ent["unreadable"]:
+                            continue
+                        m = ent["model"]
+                        needs_rescue = (
+                            m.get("tier", 2) == 2
+                            or m.get("win_ok", 0) < max(1, m.get("active_windows", 0))
+                            or m.get("post_inliers", 0) < int(0.65 * n_stream_cues)
+                        )
+                        if not needs_rescue:
+                            continue
+                        dense_model = _solve_stream_sync_model(dense_ref, ent["cues"])
+                        d_aw = max(1, dense_model.get("active_windows", 0))
+                        if (
+                            dense_model.get("tier") in (0, 1)
+                            and dense_model.get("win_ok", 0) >= max(4, d_aw - 1)
+                            and (dense_model.get("median_residual_ms") or 999) <= 200.0
+                        ):
+                            dense_model["label"] = (dense_model.get("label") or "🔄 تمت المزامنة") + " [مرجع متكامل]"
+                            ent["model"] = dense_model
+            except Exception:
+                pass
+
+    details = []
+    for ent in entries:
+        sp = ent["path"]
+        model = ent["model"]
+        if ent["unreadable"]:
+            details.append({"file": os.path.basename(sp), "path": sp, "mode": "unreadable", "tier": 2, "win_ok": 0})
+            continue
 
         if model.get("tier") in (0, 1):
-            final_text = _apply_stream_sync_model(cleaned_text, model)
+            final_text = _apply_stream_sync_model(ent["cleaned_text"], model)
         else:
-            final_text = cleaned_text
+            final_text = ent["cleaned_text"]
 
         with open(sp, "w", encoding="utf-8-sig", newline="\n") as out_f:
             out_f.write(final_text)
