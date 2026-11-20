@@ -442,7 +442,7 @@ def _launch_detached_win32(cmd, hidden=True):
     try:
         escaped_args = []
         for arg in cmd:
-            if any(c in arg for c in ' \t"'):
+            if any(c in arg for c in ' \t"&|<>^'):
                 escaped_args.append('"' + arg.replace('"', '\\"') + '"')
             else:
                 escaped_args.append(arg)
@@ -1261,6 +1261,16 @@ def _sync_sub_for_stream_url(stream_url, sub_path):
     return {"synced": False, "reason": "no_adjustment"}
 
 
+def _probe_http_playable(url, timeout=8):
+    """Returns True if url responds with HTTP 200/206 (or valid redirect) without 4xx/5xx."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-1023"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status in (200, 206)
+    except Exception:
+        return False
+
+
 def stream_movie(query_or_imdb, player="mpc", year=None):
     """
     Streams the best 4K/1080p Remux/WEB-DL release directly in the chosen player
@@ -1275,11 +1285,27 @@ def stream_movie(query_or_imdb, player="mpc", year=None):
     if not streams:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة للفلم {canonical_title}."}
 
-    best, _ = select_best_movie_release(streams)
-    if not best or not best.get("direct_url"):
+    best, top_alts = select_best_movie_release(streams)
+    if not best:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على رابط بث مباشر مخزن على TorBox."}
 
-    stream_url = unwrap_debrid_redirect(best["direct_url"])
+    candidates = [best] + [a for a in (top_alts or []) if a.get("direct_url") != best.get("direct_url")]
+    chosen = None
+    stream_url = None
+    for cand in candidates:
+        raw_u = cand.get("direct_url")
+        if not raw_u:
+            continue
+        unwrapped = unwrap_debrid_redirect(raw_u)
+        if _probe_http_playable(unwrapped):
+            chosen = cand
+            stream_url = unwrapped
+            break
+
+    if not chosen or not stream_url:
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "روابط TorBox الحالية لهذا الفلم ترجع خطأ من الخادم (HTTP 500) ولم يتم العثور على رابط بث صالح."}
+
+    best = chosen
 
     import subtitle_manager
     sub_cache_dir = os.path.join(os.environ.get("TEMP", "."), "torrentx_stream_subs", re.sub(r'[\\/*?:"<>|]', '', canonical_title))
