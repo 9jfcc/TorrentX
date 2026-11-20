@@ -64,5 +64,6 @@ If any movie returns `"error": true`, show its `message` directly without retryi
 | Subtitles only | `python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" smart-fetch "<Title>" "<IMDb ID>" "<OutDir>" "<VideoFilename>"` |
 | Sync existing subtitle | `python "$env:USERPROFILE\.gemini\config\skills\torrentx\subtitle_manager.py" sync "<VideoPath>" "<SubPath>"` |
 | Stream movie without downloading | `python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" stream-movie "<Title>" [mpc\|potplayer\|mpv\|vlc]` *(always report `subtitles.subtitles_dir` and `subtitles.loaded_subtitle_paths`)* |
+| Stream series episode without downloading | `python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" stream-series "<Title>" <Season> <Episode> [mpc\|potplayer\|mpv\|vlc]` *(always report `subtitles.subtitles_dir` and `subtitles.loaded_subtitle_paths`)* |
 | Stream / Play | `python "$env:USERPROFILE\.gemini\config\skills\torrentx\debrid_manager.py" play "<URL or Path>" "[SubPath]"` |
 | Rare P2P inspection (explicit request only) | `mcp_torrentx_search` / `mcp_torrentx_find` / `mcp_torrentx_inspect_media` |

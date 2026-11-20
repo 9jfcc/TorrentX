@@ -1977,7 +1977,15 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None, title=N
 
     sync_report = None
     if auto_sync and is_http and sub_list:
-        sync_report = _sync_subs_for_stream_url(video_path_or_url, sub_list)
+        try:
+            import subtitle_manager
+            ref_data = subtitle_manager.extract_stream_reference_timestamps(video_path_or_url, is_series=False)
+            if ref_data and ref_data.get("times"):
+                sync_report = subtitle_manager.solve_and_apply_stream_sync(sub_list, ref_data)
+            else:
+                sync_report = _sync_subs_for_stream_url(video_path_or_url, sub_list)
+        except Exception:
+            sync_report = _sync_subs_for_stream_url(video_path_or_url, sub_list)
 
     movie_slug = _make_ascii_slug(title or video_path_or_url)
     stage_dir = None
@@ -2377,20 +2385,98 @@ def _probe_http_playable(url, timeout=8):
         return False
 
 
-def stream_movie(query_or_imdb, player="mpc", year=None):
+def resolve_series_identity(title_or_imdb, year=None):
     """
-    Streams the best 4K/1080p Remux/WEB-DL release directly in the chosen player
-    WITHOUT downloading the movie, while fetching, syncing, and attaching ALL Arabic subtitles.
+    Fast lookup on TMDB / IMDb to get (imdb_id, canonical_title, release_year) for a TV series.
     """
-    t0 = time.time()
-    imdb_id, canonical_title, release_year = resolve_movie_identity(query_or_imdb, year=year)
-    if not imdb_id:
-        return {"error": True, "message": f"لم يتم العثور على الفلم '{query_or_imdb}'."}
+    clean_q = str(title_or_imdb).strip()
+    tmdb_key = "8476a7ab80ad76f0936744df0430e67c"
+    if re.match(r"^tt\d+$", clean_q, re.I):
+        imdb_id = clean_q.lower()
+        try:
+            url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_key}&external_source=imdb_id"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                tvs = data.get("tv_results", [])
+                if tvs:
+                    tv = tvs[0]
+                    t_name = tv.get("name") or tv.get("original_name") or clean_q
+                    r_year = (tv.get("first_air_date") or "")[:4]
+                    return imdb_id, t_name, r_year
+        except Exception:
+            pass
+        return imdb_id, clean_q, str(year or "")
 
-    streams = fetch_torrentio_movie_streams(imdb_id)
-    if not streams:
-        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة للفلم {canonical_title}."}
+    m_yr = re.search(r"\b(19\d{2}|20\d{2})\b", clean_q)
+    if m_yr and not year:
+        year = m_yr.group(1)
+        clean_q = re.sub(r"\b(19\d{2}|20\d{2})\b", "", clean_q).strip(" ()-_.")
 
+    yr_param = f"&first_air_date_year={year}" if year else ""
+    url = f"https://api.themoviedb.org/3/search/tv?api_key={tmdb_key}&query={urllib.parse.quote(clean_q)}{yr_param}&include_adult=false"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            results = data.get("results", [])
+            if results:
+                tv = results[0]
+                tv_id = tv["id"]
+                t_name = tv.get("name") or tv.get("original_name") or clean_q
+                r_year = (tv.get("first_air_date") or "")[:4]
+                ext_url = f"https://api.themoviedb.org/3/tv/{tv_id}/external_ids?api_key={tmdb_key}"
+                ext_req = urllib.request.Request(ext_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(ext_req, timeout=5) as ext_resp:
+                    ext_data = json.loads(ext_resp.read().decode("utf-8"))
+                    if ext_data.get("imdb_id"):
+                        return ext_data["imdb_id"], t_name, r_year
+    except Exception:
+        pass
+
+    try:
+        slug = urllib.parse.quote(clean_q.lower().replace(" ", "_"))
+        url_imdb = f"https://v3.sg.media-imdb.com/suggestion/x/{slug}.json"
+        req = urllib.request.Request(url_imdb, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            r_imdb = json.loads(resp.read().decode("utf-8"))
+            for item in r_imdb.get("d", []):
+                if item.get("id", "").startswith("tt"):
+                    return item["id"], item.get("l", clean_q), str(item.get("y", year or ""))
+    except Exception:
+        pass
+
+    return None, clean_q, str(year or "")
+
+
+def fetch_torrentio_series_streams(imdb_id, season, episode):
+    """Fetches Torrentio streams for a TV series episode using active debrid service."""
+    svc_id, api_key = get_active_service()
+    prefix = f"{svc_id}={api_key}/" if (svc_id != "p2p" and api_key) else ""
+    url = f"https://torrentio.strem.fun/{prefix}stream/series/{imdb_id}:{int(season)}:{int(episode)}.json"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            streams = data.get("streams", [])
+            for s in streams:
+                s["_debrid_service"] = svc_id
+            return streams
+    except Exception:
+        return []
+
+
+def _stream_resolved_media(t0, imdb_id, canonical_title, release_year, streams, player="mpc", season=None, episode=None):
+    """
+    Shared zero-download stream pipeline for movies & series episodes:
+    1. Selects best cached release & validates playable CDN URL.
+    2. Runs ground-truth multi-window reference timestamp extraction (Text/PGS/Audio VAD)
+       IN PARALLEL with SubSource/SubDL Arabic subtitle fetching.
+    3. Solves full-video sync model (Natural / Constant / FPS Affine / Piecewise) +
+       un-reverses Arabic RTL punctuation/parens cleanly.
+    4. Orders synced subtitles first and launches the chosen player.
+    """
+    is_series = (season is not None and episode is not None)
     best, top_alts = select_best_movie_release(streams)
     if not best:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على رابط بث مباشر مخزن على TorBox."}
@@ -2409,44 +2495,77 @@ def stream_movie(query_or_imdb, player="mpc", year=None):
             break
 
     if not chosen or not stream_url:
-        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "روابط TorBox الحالية لهذا الفلم ترجع خطأ من الخادم (HTTP 500) ولم يتم العثور على رابط بث صالح."}
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "روابط TorBox الحالية ترجع خطأ من الخادم (HTTP 500) ولم يتم العثور على رابط بث صالح."}
 
     best = chosen
 
     import subtitle_manager
-    movie_slug = _make_ascii_slug(f"{canonical_title}_{release_year}" if release_year else canonical_title)
+    if is_series:
+        ep_tag = f"S{int(season):02d}E{int(episode):02d}"
+        slug_raw = f"{canonical_title}_{ep_tag}"
+        display_title = f"{canonical_title} {ep_tag}"
+    else:
+        slug_raw = f"{canonical_title}_{release_year}" if release_year else canonical_title
+        display_title = f"{canonical_title} ({release_year})" if release_year else canonical_title
+
+    movie_slug = _make_ascii_slug(slug_raw)
     sub_cache_dir = os.path.join(os.environ.get("TEMP", "."), "torrentx_stream_subs", movie_slug)
     os.makedirs(sub_cache_dir, exist_ok=True)
+    for old_sub in os.listdir(sub_cache_dir):
+        if old_sub.lower().endswith(SUBTITLE_EXTS):
+            try:
+                os.remove(os.path.join(sub_cache_dir, old_sub))
+            except Exception:
+                pass
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_emb = pool.submit(subtitle_manager.check_embedded_arabic_sub, stream_url, 10)
+        fut_ref = pool.submit(subtitle_manager.extract_stream_reference_timestamps, stream_url, is_series)
         fut_sub = pool.submit(
             subtitle_manager.smart_fetch_subtitles,
-            canonical_title, imdb_id, sub_cache_dir, best["title"], best.get("release_type")
+            canonical_title, imdb_id, sub_cache_dir, best["title"], best.get("release_type"),
+            season, episode
         )
-        embedded_check = fut_emb.result()
+        ref_data = fut_ref.result()
         sub_fetch = fut_sub.result()
 
+    has_embedded_ar = bool(ref_data and ref_data.get("has_embedded_arabic"))
+    embedded_tracks = (ref_data or {}).get("arabic_tracks", [])
     subs_to_load = []
     sync_info = None
-    if embedded_check.get("has_embedded_arabic"):
+
+    if has_embedded_ar:
         subtitle_status = "embedded_arabic_found"
     else:
         all_subs = [d.get("file_path") for d in sub_fetch.get("downloaded", []) if d.get("file_path") and os.path.exists(d.get("file_path"))]
         if all_subs:
-            sync_info = _sync_subs_for_stream_url(stream_url, all_subs)
-            subs_to_load = all_subs
+            if ref_data and ref_data.get("times"):
+                sync_info = subtitle_manager.solve_and_apply_stream_sync(all_subs, ref_data)
+                details = sync_info.get("details") or []
+                indexed = list(enumerate(all_subs))
+                det_map = {d.get("path"): d for d in details if d.get("path")}
+
+                def _sub_rank(pair):
+                    orig_idx, sp = pair
+                    d = det_map.get(sp) or {}
+                    tier = d.get("tier", 2)
+                    in_sync_grp = 0 if tier in (0, 1) else 1
+                    win_ok = d.get("win_ok", 0)
+                    return (in_sync_grp, -win_ok, orig_idx)
+
+                indexed.sort(key=_sub_rank)
+                subs_to_load = [sp for _, sp in indexed]
+            else:
+                sync_info = _sync_subs_for_stream_url(stream_url, all_subs)
+                subs_to_load = all_subs
             subtitle_status = "external_synced_for_stream"
         else:
             subtitle_status = "no_arabic_subtitle_found"
 
-    display_title = f"{canonical_title} ({release_year})" if release_year else canonical_title
     play_res = stream_to_player(stream_url, subtitle_path=subs_to_load, player=player, title=display_title)
-    return {
+    res_obj = {
         "success": bool(play_res.get("success")),
         "mode": "stream_without_download",
         "elapsed_seconds": round(time.time() - t0, 2),
-        "movie": {"title": canonical_title, "year": release_year, "imdb_id": imdb_id},
         "selected_release": {
             "filename": best["title"],
             "quality_tier": best["tier_label"],
@@ -2455,14 +2574,59 @@ def stream_movie(query_or_imdb, player="mpc", year=None):
         "player": play_res,
         "subtitles": {
             "status": subtitle_status,
-            "has_embedded_arabic": embedded_check.get("has_embedded_arabic", False),
-            "embedded_tracks": embedded_check.get("arabic_tracks", []),
+            "has_embedded_arabic": has_embedded_ar,
+            "embedded_tracks": embedded_tracks,
             "subtitles_dir": sub_cache_dir,
             "loaded_subtitle_paths": play_res.get("subtitles", subs_to_load),
             "stream_sync": sync_info,
             "subtitles_location_message": f"تم حفظ ومزامنة {len(play_res.get('subtitles', subs_to_load))} ترجمات عربية في: {sub_cache_dir}"
         }
     }
+    if is_series:
+        res_obj["series"] = {
+            "title": canonical_title,
+            "year": release_year,
+            "imdb_id": imdb_id,
+            "season": int(season),
+            "episode": int(episode),
+        }
+    else:
+        res_obj["movie"] = {"title": canonical_title, "year": release_year, "imdb_id": imdb_id}
+    return res_obj
+
+
+def stream_movie(query_or_imdb, player="mpc", year=None):
+    """
+    Streams the best 4K/1080p Remux/WEB-DL release directly in the chosen player
+    WITHOUT downloading the movie, while fetching, syncing, and attaching ALL Arabic subtitles.
+    """
+    t0 = time.time()
+    imdb_id, canonical_title, release_year = resolve_movie_identity(query_or_imdb, year=year)
+    if not imdb_id:
+        return {"error": True, "message": f"لم يتم العثور على الفلم '{query_or_imdb}'."}
+
+    streams = fetch_torrentio_movie_streams(imdb_id)
+    if not streams:
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة للفلم {canonical_title}."}
+
+    return _stream_resolved_media(t0, imdb_id, canonical_title, release_year, streams, player=player)
+
+
+def stream_series_episode(query_or_imdb, season, episode, player="mpc", year=None):
+    """
+    Streams the best release of a TV series episode directly in the chosen player
+    WITHOUT downloading, while fetching, syncing, and attaching ALL Arabic subtitles.
+    """
+    t0 = time.time()
+    imdb_id, canonical_title, release_year = resolve_series_identity(query_or_imdb, year=year)
+    if not imdb_id:
+        return {"error": True, "message": f"لم يتم العثور على المسلسل '{query_or_imdb}'."}
+
+    streams = fetch_torrentio_series_streams(imdb_id, season, episode)
+    if not streams:
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة للحلقة S{int(season):02d}E{int(episode):02d} من {canonical_title}."}
+
+    return _stream_resolved_media(t0, imdb_id, canonical_title, release_year, streams, player=player, season=int(season), episode=int(episode))
 
 
 if __name__ == "__main__":
@@ -2475,6 +2639,7 @@ if __name__ == "__main__":
         print("  python debrid_manager.py resolve <magnet>")
         print("  python debrid_manager.py play <url_or_path> [sub_path_or_dir_or_semicolon_list] [mpc|potplayer|mpv|mpvnet|vlc] [--sync]")
         print("  python debrid_manager.py stream-movie <title_or_imdb> [mpc|potplayer|mpv|mpvnet|vlc] [year]")
+        print("  python debrid_manager.py stream-series <title_or_imdb> <season> <episode> [mpc|potplayer|mpv|mpvnet|vlc] [year]")
         sys.exit(1)
 
     action = sys.argv[1].lower()
@@ -2490,6 +2655,15 @@ if __name__ == "__main__":
         plr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "none" else "mpc"
         yr = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "none" else None
         res = stream_movie(q, player=plr, year=yr)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+
+    elif action == "stream-series" and len(sys.argv) >= 5:
+        q = sys.argv[2]
+        sea = int(sys.argv[3])
+        ep = int(sys.argv[4])
+        plr = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != "none" else "mpc"
+        yr = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != "none" else None
+        res = stream_series_episode(q, sea, ep, player=plr, year=yr)
         print(json.dumps(res, indent=2, ensure_ascii=False))
 
     elif action == "fast-movie" and len(sys.argv) >= 3:

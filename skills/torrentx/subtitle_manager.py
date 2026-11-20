@@ -4,6 +4,7 @@ import sys
 import json
 import re
 import time
+import bisect
 import struct
 import hashlib
 import unicodedata
@@ -112,25 +113,40 @@ def clean_subtitle_ads(sub_text):
     return "\n\n".join(cleaned_blocks) + "\n"
 
 
+def _is_balanced_pair(s, o="(", c=")"):
+    bal = 0
+    for ch in s:
+        if ch == o:
+            bal += 1
+        elif ch == c:
+            bal -= 1
+            if bal < 0:
+                return False
+    return bal == 0
+
+
 def fix_arabic_rtl_text(sub_text):
     """
-    Cleans OpenSubtitles ads/watermarks and fixes Arabic RTL punctuation & dialogue dashes
-    using Unicode RLE (\u202B) + RLM (\u200F) + PDF (\u202C) so punctuation never flips in Stremio/MPV.
+    Cleans OpenSubtitles ads/watermarks, strips ASS/WebVTT cue tags, un-reverses legacy
+    LTR visual-hack punctuation/parentheses/dashes/quotes, and wraps Arabic lines with
+    Unicode RLE (\u202B) + RLM (\u200F) + PDF (\u202C) so punctuation renders accurately.
     """
     sub_text = clean_subtitle_ads(sub_text)
     sub_text = re.sub(r"\{\\[^}]*\}", "", sub_text)
-    # Strip WebVTT inline class/voice tags like <c.white>, </c>, <v Name>, </v>
+    # Strip WebVTT inline class/voice/lang tags like <c.white>, </c>, <v Name>, </v>
     sub_text = re.sub(r"</?(?:c(?:\.[^>]*)?|v(?:\s+[^>]*)?|lang(?:\s+[^>]*)?)>", "", sub_text, flags=re.I)
     RLM = "\u200F"
     RLE = "\u202B"
     PDF = "\u202C"
+    BIDI_STRIP = " \t\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069"
     lines = sub_text.splitlines()
     new_lines = []
 
     ts_pattern = re.compile(r"^\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}")
     arabic_pattern = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
     trailing_punct = re.compile(r"([.!?؟:;،,\-\'\"\)\]\}]+)$")
-    leading_punct = re.compile(r"^([.!؟:;،,]+)\s*(.+)")
+    lead_el_re = re.compile(r"^(\.{2,3})(?:\s+|(?=[(\[\-–—ـ]))(.+)$")
+    lead_punct_re = re.compile(r"^([.!؟:;،,]+)\s*(.+)$")
 
     for line in lines:
         stripped = line.strip()
@@ -142,22 +158,108 @@ def fix_arabic_rtl_text(sub_text):
             new_lines.append(line)
             continue
 
-        l = line.strip(" \t\u200E\u200F\u202A\u202B\u202C\u2066\u2067\u2069")
+        l = line.strip(BIDI_STRIP)
 
-        m_lead = leading_punct.match(l)
-        if m_lead and m_lead.group(1) != "...":
-            punct, rest = m_lead.group(1), m_lead.group(2)
-            l = f"{rest}{punct}"
+        # Peel outer HTML formatting tags (e.g., <font ...>...</font>, <i>...</i>)
+        prefix_tags = ""
+        suffix_tags = ""
+        core = l
+        m_pre = re.match(r"^((?:<(?:font|i|b|u)\b[^>]*>\s*)+)", core, re.I)
+        if m_pre:
+            prefix_tags = m_pre.group(1).strip()
+            core = core[m_pre.end():]
+        m_suf = re.search(r"((?:\s*</(?:font|i|b|u)>)+)$", core, re.I)
+        if m_suf:
+            suffix_tags = m_suf.group(1).strip()
+            core = core[:m_suf.start()]
+        core = core.strip(BIDI_STRIP)
+        if not core:
+            new_lines.append(line)
+            continue
 
-        if l.startswith("-") or l.startswith("–") or l.startswith("—"):
-            dash = l[0]
-            rest = l[1:].strip()
-            l = f"{RLM}{dash} {rest}"
+        # Rule 1: Leading ellipsis + space moved from end (e.g. "... لكن" -> "لكن...")
+        m_el = lead_el_re.match(core)
+        if m_el and not re.search(r"(\.{2,3}|[.!؟:;،,])$", m_el.group(2)):
+            core = f"{m_el.group(2)}{m_el.group(1)}"
 
-        if trailing_punct.search(l) and not l.endswith(RLM):
-            l = f"{l}{RLM}"
+        # Rule 2: Leading sentence punctuation moved from end (up to 2 passes)
+        for _ in range(2):
+            m_lead = lead_punct_re.match(core)
+            if m_lead and m_lead.group(1) not in ("..", "..."):
+                core = f"{m_lead.group(2).strip(BIDI_STRIP)}{m_lead.group(1)}"
+            else:
+                break
 
-        new_lines.append(f"{RLE}{l}{PDF}")
+        # Rule 2b: Leading % moved from trailing number (e.g. "%على أتعابهم الـ 2" -> "على أتعابهم الـ 2%")
+        if re.match(r"^%[\u0600-\u06FF]", core) and re.search(r"[\d\u0660-\u0669]$", core):
+            core = f"{core[1:]}%"
+
+        # Rule 3: Trailing dialogue dash moved from start (e.g. "ثانية -" -> "- ثانية")
+        if not re.match(r"^[-–—ـ]", core):
+            m_td = re.search(r"^(.+?)\s+([-–—])$", core)
+            if m_td and arabic_pattern.search(m_td.group(1)):
+                core = f"{m_td.group(2)} {m_td.group(1)}"
+
+        # Rule 4: Peel optional leading dialogue dash
+        m_ld = re.match(r"^([-–—ـ]\s*)(.+)$", core)
+        if m_ld:
+            lead_dash, inner = m_ld.group(1), m_ld.group(2).strip(BIDI_STRIP)
+        else:
+            lead_dash, inner = "", core
+
+        # Rule 5: Un-reverse LTR-hacked () and []
+        for o, c in (("(", ")"), ("[", "]")):
+            if not _is_balanced_pair(inner, o, c) and inner and inner[0] in (o, c):
+                rest = inner[1:]
+                if rest.count(o) == rest.count(c) + 1 and _is_balanced_pair(rest + c, o, c):
+                    m_tp = re.search(r"(\.{2,3}|[.!؟:;،,]+)$", rest)
+                    if m_tp:
+                        inner = f"{rest[:m_tp.start()]}{c}{m_tp.group(1)}"
+                    else:
+                        inner = f"{rest}{c}"
+
+            if not _is_balanced_pair(inner, o, c):
+                m_end = re.search(r"([.!؟:;،,]*)" + re.escape(c) + r"(\.{2,3}|[.!؟:;،,]*)$", inner)
+                if m_end:
+                    cand_no_tail = inner[:m_end.start()] + m_end.group(1) + m_end.group(2)
+                    cand_opts = [o + cand_no_tail]
+                    if cand_no_tail and cand_no_tail[0] in ('"', "'"):
+                        cand_opts.append(cand_no_tail[0] + o + cand_no_tail[1:])
+                    for cand_fixed in cand_opts:
+                        if _is_balanced_pair(cand_fixed, o, c):
+                            inner = cand_fixed
+                            break
+
+            if inner.count(o) == inner.count(c) + 1 and _is_balanced_pair(inner + c, o, c):
+                m_tp = re.search(r"(\.{2,3}|[.!؟:;،,]+)$", inner)
+                if m_tp:
+                    inner = f"{inner[:m_tp.start()]}{c}{m_tp.group(1)}"
+                else:
+                    inner = f"{inner}{c}"
+
+        # Rule 6: Un-reverse LTR-hacked double quotes " (ONLY when first " is NOT followed by a letter/digit,
+        # so Arabic attached prefixes like بـ"لويس رانيري"، / ﺒ"لويس رانيري"، remain intact!)
+        if inner.count('"') == 2 and not re.search(r'(?:^|\s)"', inner):
+            first_q = inner.find('"')
+            next_ch = inner[first_q + 1] if (first_q >= 0 and first_q + 1 < len(inner)) else ""
+            if first_q > 0 and not (next_ch.isalnum() or next_ch in "_ـ"):
+                m_q = re.search(r'([.!؟:;،,]*)"(\.{2,3}|[.!؟:;،,]*)$', inner)
+                if m_q:
+                    inner = '"' + inner[:m_q.start()] + m_q.group(1) + m_q.group(2)
+
+        # Rule 7: Re-attach dash, trailing RLM, and RLE/PDF inside outer HTML tags
+        if lead_dash:
+            if lead_dash[0] in ("-", "–", "—"):
+                core = f"{RLM}{lead_dash[0]} {inner.lstrip()}"
+            else:
+                core = f"{lead_dash}{inner}"
+        else:
+            core = inner
+
+        if trailing_punct.search(core) and not core.endswith(RLM):
+            core = f"{core}{RLM}"
+
+        new_lines.append(f"{prefix_tags}{RLE}{core}{PDF}{suffix_tags}")
 
     return "\n".join(new_lines)
 
@@ -1122,8 +1224,10 @@ def extract_embedded_reference_sub(video_path, out_path=None):
             res = subprocess.run([mkvmerge_bin, "-J", video_path], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
             if res.returncode == 0:
                 data = json.loads(res.stdout)
-                text_track_id = None
-                pgs_track_id = None
+                # 4-tier priority: 1) eng/en/ara/ar TEXT, 2) any non-forced/commentary TEXT,
+                # 3) eng/en/ara/ar PGS, 4) any non-forced/commentary PGS
+                text_p1, text_p2 = None, None
+                pgs_p3, pgs_p4 = None, None
 
                 for t in data.get("tracks", []):
                     if t.get("type") != "subtitles":
@@ -1132,15 +1236,22 @@ def extract_embedded_reference_sub(video_path, out_path=None):
                     lang = str(props.get("language") or "").lower()
                     tname = str(props.get("track_name") or "").lower()
                     codec = str(t.get("codec") or "").lower()
-                    if "forced" in tname or "commentary" in tname:
+                    if props.get("forced_track") or "forced" in tname or "commentary" in tname or "signs" in tname:
                         continue
-                    is_pref_lang = lang in ["eng", "en", "und", "fre", "spa", "ger", "ita"]
+                    is_pref_lang = lang in ("eng", "en", "ara", "ar")
                     if ("subrip" in codec or "text" in codec or "utf8" in codec or "ass" in codec or "ssa" in codec):
-                        if is_pref_lang and text_track_id is None:
-                            text_track_id = (t.get("id"), codec)
+                        if is_pref_lang and text_p1 is None:
+                            text_p1 = (t.get("id"), codec)
+                        elif text_p2 is None:
+                            text_p2 = (t.get("id"), codec)
                     elif "pgs" in codec or "hdmv" in codec:
-                        if is_pref_lang and pgs_track_id is None:
-                            pgs_track_id = t.get("id")
+                        if is_pref_lang and pgs_p3 is None:
+                            pgs_p3 = t.get("id")
+                        elif pgs_p4 is None:
+                            pgs_p4 = t.get("id")
+
+                text_track_id = text_p1 or text_p2
+                pgs_track_id = pgs_p3 or pgs_p4
 
                 # 1. Prefer embedded text track (SRT/ASS)
                 if text_track_id is not None:
@@ -1177,14 +1288,15 @@ def extract_embedded_reference_sub(video_path, out_path=None):
         except Exception:
             pass
 
-    # Fallback with ffmpeg for text streams
-    try:
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-map", "0:s:m:language:eng?", "-c:s", "srt", out_path]
-        subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
-            return out_path
-    except Exception:
-        pass
+    # Fallback with ffmpeg for text streams (e.g., MP4 mov_text)
+    for map_spec in ("0:s:m:language:eng?", "0:s:0"):
+        try:
+            cmd = ["ffmpeg", "-y", "-i", video_path, "-map", map_spec, "-c:s", "srt", out_path]
+            subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                return out_path
+        except Exception:
+            pass
     return None
 
 
@@ -1267,10 +1379,23 @@ def shift_subtitle_timestamps(sub_path, offset_seconds, output_path=None):
     }
 
 
+def _nearest_sorted_val(sorted_vals, target):
+    """Returns the closest value to target in a non-empty sorted list in O(log N)."""
+    idx = bisect.bisect_left(sorted_vals, target)
+    if idx == 0:
+        return sorted_vals[0]
+    if idx == len(sorted_vals):
+        return sorted_vals[-1]
+    before = sorted_vals[idx - 1]
+    after = sorted_vals[idx]
+    return before if (target - before) <= (after - target) else after
+
+
 def check_timing_against_reference(sub_path, ref_sub_path):
     """
     Compares external Arabic subtitle timestamps against extracted reference subtitle (.ref_eng.srt)
-    using cross-correlation histogram on early and mid-movie cues.
+    across 3 balanced segments (Early, Mid, Late) using 0.1s histogram cross-correlation
+    + 1-to-1 per-reference-cue median refinement.
     Returns (is_matched, offset_seconds, drift_seconds).
     """
     _, _, sub_starts = parse_sub_timestamps(sub_path)
@@ -1278,28 +1403,155 @@ def check_timing_against_reference(sub_path, ref_sub_path):
     if not sub_starts or not ref_starts:
         return False, 0.0, 0.0
 
-    early_ref = [t for t in ref_starts if 120 <= t <= 1200] or ref_starts[:50]
-    mid_ref = [t for t in ref_starts if 1200 < t <= 3600] or ref_starts[len(ref_starts)//2:len(ref_starts)//2 + 50]
+    sub_sorted = sorted(sub_starts)
+    ref_sorted = sorted(ref_starts)
+    t_min, t_max = ref_sorted[0], ref_sorted[-1]
+    span = max(1.0, t_max - t_min)
 
-    def find_peak(r_list):
-        buckets = Counter()
-        for r in r_list:
-            for s in sub_starts:
-                diff = r - s
-                if -60.0 <= diff <= 60.0:
-                    buckets[round(diff, 1)] += 1
-        if not buckets:
-            return None, 0
-        return buckets.most_common(1)[0]
+    seg_early = [t for t in ref_sorted if (t_min + 0.05 * span) <= t <= (t_min + 0.33 * span)]
+    seg_mid = [t for t in ref_sorted if (t_min + 0.33 * span) < t <= (t_min + 0.66 * span)]
+    seg_late = [t for t in ref_sorted if (t_min + 0.66 * span) < t <= (t_min + 0.95 * span)]
+    segs = [seg_early, seg_mid, seg_late]
 
-    peak_e, cnt_e = find_peak(early_ref)
-    peak_m, cnt_m = find_peak(mid_ref)
-    if peak_e is None or cnt_e < 4:
+    if any(len(s) < 8 for s in segs) and len(ref_sorted) >= 9:
+        n_ref = len(ref_sorted)
+        segs = [
+            ref_sorted[: n_ref // 3],
+            ref_sorted[n_ref // 3 : (2 * n_ref) // 3],
+            ref_sorted[(2 * n_ref) // 3 :],
+        ]
+
+    nonempty_segs = [s for s in segs if s]
+    if not nonempty_segs:
         return False, 0.0, 99.0
 
-    drift = abs((peak_m if (peak_m is not None and cnt_m >= 4) else peak_e) - peak_e)
-    is_matched = (abs(peak_e) <= 0.45 and drift <= 0.25)
-    return is_matched, round(peak_e, 2), round(drift, 2)
+    def _solve_segment_peak(seg_ref):
+        buckets = Counter()
+        for r in seg_ref:
+            lo = bisect.bisect_left(sub_sorted, r - 90.0)
+            hi = bisect.bisect_right(sub_sorted, r + 90.0)
+            for s in sub_sorted[lo:hi]:
+                buckets[round(r - s, 1)] += 1
+        if not buckets:
+            return None, 0
+
+        top_cands = [b for b, _ in buckets.most_common(5)]
+        if 0.0 not in top_cands:
+            top_cands.append(0.0)
+
+        best_inliers = []
+        best_med_abs = float("inf")
+        for cand in top_cands:
+            inliers = []
+            for r in seg_ref:
+                closest_s = _nearest_sorted_val(sub_sorted, r - cand)
+                if abs((r - cand) - closest_s) <= 0.45:
+                    inliers.append(r - closest_s)
+            if inliers:
+                med_val = sorted(inliers)[len(inliers) // 2]
+                if len(inliers) > len(best_inliers) or (len(inliers) == len(best_inliers) and abs(med_val) < best_med_abs):
+                    best_inliers = inliers
+                    best_med_abs = abs(med_val)
+
+        if not best_inliers:
+            return None, 0
+
+        best_inliers.sort()
+        med_off = best_inliers[len(best_inliers) // 2]
+        refined = []
+        for r in seg_ref:
+            closest_s = _nearest_sorted_val(sub_sorted, r - med_off)
+            if abs((r - med_off) - closest_s) <= 0.45:
+                refined.append(r - closest_s)
+        if not refined:
+            return None, 0
+        refined.sort()
+        return refined[len(refined) // 2], len(refined)
+
+    valid_peaks = []
+    inlier_cnts = []
+    for seg_ref in nonempty_segs:
+        pk, cnt = _solve_segment_peak(seg_ref)
+        min_req = max(4, int(0.12 * len(seg_ref)))
+        if pk is not None and cnt >= min_req:
+            valid_peaks.append(pk)
+            inlier_cnts.append(cnt)
+
+    if len(valid_peaks) < min(2, len(nonempty_segs)):
+        return False, 0.0, 99.0
+
+    total_seg_cues = max(1, sum(len(seg) for seg in nonempty_segs))
+    match_ratio = sum(inlier_cnts) / float(total_seg_cues)
+    med_offset = sorted(valid_peaks)[len(valid_peaks) // 2]
+    max_abs_off = max(abs(p) for p in valid_peaks)
+    drift = max(valid_peaks) - min(valid_peaks)
+    is_matched = (max_abs_off <= 0.35 and drift <= 0.25 and match_ratio >= 0.30)
+    return is_matched, round(med_offset, 3), round(drift, 3)
+
+
+def _build_local_ref_data_from_srt(ref_sub_path):
+    """
+    Builds a 5-window ref_data dict directly from a local reference SRT file (.ref_eng.srt)
+    so _solve_stream_sync_model can solve constant, FPS affine, and piecewise shifts in <0.05s.
+    """
+    _, last_end, ref_starts = parse_sub_timestamps(ref_sub_path)
+    if not ref_starts or len(ref_starts) < 15:
+        return None
+
+    ref_sorted = sorted(ref_starts)
+    dur = float(last_end or ref_sorted[-1] or 0.0)
+    if dur <= 30.0:
+        return None
+
+    fractions = (0.08, 0.27, 0.48, 0.68, 0.86)
+    half_win = 22.5
+    windows = []
+    seen_cues = []
+
+    for frac in fractions:
+        center = dur * frac
+        ws = max(0.0, center - half_win)
+        we = min(dur + 5.0, center + half_win)
+        cues_in_w = [r for r in ref_sorted if ws <= r <= we]
+
+        # Expand window if sparse, or snap center to nearest dense cue cluster inside this quintile band
+        if len(cues_in_w) < 4:
+            ws_exp = max(0.0, center - 60.0)
+            we_exp = min(dur + 5.0, center + 60.0)
+            exp_cues = [r for r in ref_sorted if ws_exp <= r <= we_exp]
+            if len(exp_cues) >= 4:
+                ws, we = ws_exp, we_exp
+                cues_in_w = exp_cues
+            elif ref_sorted:
+                nearest_r = _nearest_sorted_val(ref_sorted, center)
+                ws = max(0.0, nearest_r - half_win)
+                we = min(dur + 5.0, nearest_r + half_win)
+                cues_in_w = [r for r in ref_sorted if ws <= r <= we]
+
+        if len(cues_in_w) >= 2:
+            # Ensure non-overlapping with previous window
+            if windows and ws <= windows[-1][1]:
+                ws = windows[-1][1] + 0.1
+                cues_in_w = [r for r in ref_sorted if ws <= r <= we]
+            if len(cues_in_w) >= 2:
+                windows.append((round(ws, 2), round(we, 2)))
+                seen_cues.extend(cues_in_w)
+
+    if len(windows) < 2 or len(seen_cues) < 6:
+        return None
+
+    clean_times = []
+    for val in sorted(seen_cues):
+        if not clean_times or (val - clean_times[-1]) > 0.25:
+            clean_times.append(val)
+
+    return {
+        "times": clean_times,
+        "windows": windows,
+        "duration": dur,
+        "fps": 23.976,
+        "source": "local_srt",
+    }
 
 
 def _get_lapse_bin():
@@ -1338,13 +1590,14 @@ def _get_autosubsync_bin():
 
 def sync_subtitle_with_alass(video_path, subtitle_path, output_path=None, ref_sub_path=None):
     """
-    Synchronizes subtitle using a verified multi-tool waterfall:
-    1. alass (Priority 1)
+    Synchronizes subtitle using a hybrid mathematical + verified multi-tool waterfall:
+    0.5. Local Multi-Window Math Solver (solves constant, 25<->23.976 FPS affine, piecewise in <0.05s)
+    1. alass (runs on FPS pre-corrected subtitle first if affine+cut detected, else original)
     2. lapse (Fallback if alass fails or fails post-sync verification)
-    3. ffsubsync (Fallback)
+    3. ffsubsync --gss (Fallback with full-file FPS golden-section search)
     4. autosubsync / subsync (Fallback)
-    If ref_sub_path is provided (or can be extracted from video_path), verifies timing after each tool
-    and picks the first verified match (or the lowest-error candidate across all tools).
+    Verifies full-movie 3-segment timing after each stage and picks the first verified match
+    (or the lowest-error candidate across all stages).
     """
     if not output_path:
         base, ext = os.path.splitext(subtitle_path)
@@ -1358,196 +1611,210 @@ def sync_subtitle_with_alass(video_path, subtitle_path, output_path=None, ref_su
         ref_sub_path = extract_embedded_reference_sub(video_path)
         cleanup_ref = True
 
-    def _cleanup_ref_file():
+    fps_precorrected_path = None
+    best_candidate = None
+    tools_tried = []
+
+    def _cleanup_temps():
         if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
             try:
                 os.remove(ref_sub_path)
             except Exception:
                 pass
-
-    # Fast check: Is the subtitle ALREADY perfectly synced (<0.45s offset, <0.25s drift)?
-    if ref_sub_path and os.path.exists(ref_sub_path):
-        is_matched, offset_s, drift_s = check_timing_against_reference(subtitle_path, ref_sub_path)
-        if is_matched:
-            shutil.copy2(subtitle_path, output_path)
-            _cleanup_ref_file()
-            return {
-                "success": True,
-                "output_file": output_path,
-                "tool": "already_matched",
-                "shift_seconds": offset_s,
-                "drift_seconds": drift_s,
-                "verified_matched": True,
-                "post_offset_seconds": offset_s,
-                "post_drift_seconds": drift_s,
-                "message": f"التوقيت متطابق مسبقاً بدقة عالية (الفرق {offset_s:+.2f} ثانية)"
-            }
-
-    sync_source = ref_sub_path if (ref_sub_path and os.path.exists(ref_sub_path)) else video_path
-    ref_type = "embedded_sub" if (ref_sub_path and os.path.exists(ref_sub_path)) else "audio"
-    orig_first, _, _ = parse_sub_timestamps(subtitle_path)
-    base_out, ext_out = os.path.splitext(output_path)
-
-    best_candidate = None
-    tools_tried = []
-
-    def _evaluate_candidate(tool_name, cand_path):
-        nonlocal best_candidate
-        if not os.path.exists(cand_path) or os.path.getsize(cand_path) <= 1000:
-            return False
-        convert_to_utf8_bom(cand_path, apply_rtl_fix=True)
-        synced_first, _, _ = parse_sub_timestamps(cand_path)
-        shift = round((synced_first or 0) - (orig_first or 0), 2) if (orig_first is not None and synced_first is not None) else 0.0
-        if ref_sub_path and os.path.exists(ref_sub_path):
-            post_matched, post_offset, post_drift = check_timing_against_reference(cand_path, ref_sub_path)
-        else:
-            post_matched, post_offset, post_drift = (True, 0.0, 0.0)
-        score = abs(post_offset) + abs(post_drift)
-        cand_info = {
-            "tool": tool_name,
-            "path": cand_path,
-            "shift_seconds": shift,
-            "verified_matched": post_matched,
-            "post_offset_seconds": post_offset,
-            "post_drift_seconds": post_drift,
-            "score": score,
-        }
-        if best_candidate is None or score < best_candidate["score"]:
-            if best_candidate and best_candidate["path"] != cand_path and os.path.exists(best_candidate["path"]):
-                try:
-                    os.remove(best_candidate["path"])
-                except Exception:
-                    pass
-            best_candidate = cand_info
-        elif os.path.exists(cand_path):
+        if fps_precorrected_path and os.path.exists(fps_precorrected_path):
             try:
-                os.remove(cand_path)
+                os.remove(fps_precorrected_path)
             except Exception:
                 pass
-        return post_matched
 
-    # 1. Tool 1: alass
-    alass_bin = get_alass_bin()
-    if alass_bin:
-        tools_tried.append("alass")
-        cand_alass = f"{base_out}.alass{ext_out}"
-        try:
-            subprocess.run([alass_bin, sync_source, subtitle_path, cand_alass], capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
-            if _evaluate_candidate("alass", cand_alass):
-                shutil.move(best_candidate["path"], output_path)
-                _cleanup_ref_file()
+    try:
+        # Fast check: Short-circuit ONLY when already ultra-tight (<0.15s offset, <0.18s drift)
+        if ref_sub_path and os.path.exists(ref_sub_path):
+            is_matched, offset_s, drift_s = check_timing_against_reference(subtitle_path, ref_sub_path)
+            if is_matched and abs(offset_s) <= 0.15 and drift_s <= 0.18:
+                shutil.copy2(subtitle_path, output_path)
                 return {
                     "success": True,
                     "output_file": output_path,
-                    "tool": "alass",
-                    "shift_seconds": best_candidate["shift_seconds"],
-                    "ref_type": ref_type,
+                    "tool": "already_matched",
+                    "sync_mode": "natural",
+                    "shift_seconds": offset_s,
+                    "drift_seconds": drift_s,
                     "verified_matched": True,
-                    "post_offset_seconds": best_candidate["post_offset_seconds"],
-                    "post_drift_seconds": best_candidate["post_drift_seconds"],
-                    "tools_tried": tools_tried
+                    "post_offset_seconds": offset_s,
+                    "post_drift_seconds": drift_s,
+                    "message": f"التوقيت متطابق مسبقاً بدقة عالية (الفرق {offset_s:+.2f} ثانية)"
                 }
-        except Exception:
-            pass
 
-    # 2. Tool 2: lapse (AutoSubSync bundled engine)
-    lapse_bin = _get_lapse_bin()
-    if lapse_bin:
-        tools_tried.append("lapse")
-        cand_lapse = f"{base_out}.lapse{ext_out}"
-        try:
-            subprocess.run(
-                [lapse_bin, sync_source, subtitle_path, "auto", "--output", cand_lapse, "--no-backup", "--no-sidecar", "--encoding", "utf8-bom", "--quiet"],
-                capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
-            )
-            if _evaluate_candidate("lapse", cand_lapse):
-                shutil.move(best_candidate["path"], output_path)
-                _cleanup_ref_file()
-                return {
-                    "success": True,
-                    "output_file": output_path,
-                    "tool": "lapse",
-                    "shift_seconds": best_candidate["shift_seconds"],
-                    "ref_type": ref_type,
-                    "verified_matched": True,
-                    "post_offset_seconds": best_candidate["post_offset_seconds"],
-                    "post_drift_seconds": best_candidate["post_drift_seconds"],
-                    "tools_tried": tools_tried
-                }
-        except Exception:
-            pass
+        sync_source = ref_sub_path if (ref_sub_path and os.path.exists(ref_sub_path)) else video_path
+        ref_type = "embedded_sub" if (ref_sub_path and os.path.exists(ref_sub_path)) else "audio"
+        orig_first, _, _ = parse_sub_timestamps(subtitle_path)
+        base_out, ext_out = os.path.splitext(output_path)
 
-    # 3. Tool 3: ffsubsync
-    ffs_bin = _get_ffsubsync_bin()
-    if ffs_bin:
-        tools_tried.append("ffsubsync")
-        cand_ffs = f"{base_out}.ffsubsync{ext_out}"
-        try:
-            subprocess.run(
-                [ffs_bin, sync_source, "-i", subtitle_path, "-o", cand_ffs, "--max-duration-seconds", "180"],
-                capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
-            )
-            if _evaluate_candidate("ffsubsync", cand_ffs):
-                shutil.move(best_candidate["path"], output_path)
-                _cleanup_ref_file()
-                return {
-                    "success": True,
-                    "output_file": output_path,
-                    "tool": "ffsubsync",
-                    "shift_seconds": best_candidate["shift_seconds"],
-                    "ref_type": ref_type,
-                    "verified_matched": True,
-                    "post_offset_seconds": best_candidate["post_offset_seconds"],
-                    "post_drift_seconds": best_candidate["post_drift_seconds"],
-                    "tools_tried": tools_tried
-                }
-        except Exception:
-            pass
+        def _evaluate_candidate(tool_name, cand_path, sync_mode=None):
+            nonlocal best_candidate
+            if not os.path.exists(cand_path) or os.path.getsize(cand_path) <= 1000:
+                return False
+            convert_to_utf8_bom(cand_path, apply_rtl_fix=True)
+            synced_first, _, _ = parse_sub_timestamps(cand_path)
+            shift = round((synced_first or 0) - (orig_first or 0), 2) if (orig_first is not None and synced_first is not None) else 0.0
+            if ref_sub_path and os.path.exists(ref_sub_path):
+                post_matched, post_offset, post_drift = check_timing_against_reference(cand_path, ref_sub_path)
+            else:
+                post_matched, post_offset, post_drift = (True, 0.0, 0.0)
+            score = abs(post_offset) + abs(post_drift)
+            cand_info = {
+                "tool": tool_name,
+                "sync_mode": sync_mode,
+                "path": cand_path,
+                "shift_seconds": shift,
+                "verified_matched": post_matched,
+                "post_offset_seconds": post_offset,
+                "post_drift_seconds": post_drift,
+                "score": score,
+            }
+            if best_candidate is None or score < best_candidate["score"]:
+                if best_candidate and best_candidate["path"] != cand_path and os.path.exists(best_candidate["path"]):
+                    try:
+                        os.remove(best_candidate["path"])
+                    except Exception:
+                        pass
+                best_candidate = cand_info
+            elif os.path.exists(cand_path):
+                try:
+                    os.remove(cand_path)
+                except Exception:
+                    pass
+            return post_matched
 
-    # 4. Tool 4: autosubsync / subsync
-    auto_bin = _get_autosubsync_bin()
-    if auto_bin:
-        tools_tried.append("autosubsync")
-        cand_auto = f"{base_out}.autosubsync{ext_out}"
-        try:
-            subprocess.run(
-                [auto_bin, video_path, subtitle_path, cand_auto],
-                capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
-            )
-            if _evaluate_candidate("autosubsync", cand_auto):
-                shutil.move(best_candidate["path"], output_path)
-                _cleanup_ref_file()
-                return {
-                    "success": True,
-                    "output_file": output_path,
-                    "tool": "autosubsync",
-                    "shift_seconds": best_candidate["shift_seconds"],
-                    "ref_type": ref_type,
-                    "verified_matched": True,
-                    "post_offset_seconds": best_candidate["post_offset_seconds"],
-                    "post_drift_seconds": best_candidate["post_drift_seconds"],
-                    "tools_tried": tools_tried
-                }
-        except Exception:
-            pass
+        def _return_cand(cand):
+            shutil.move(cand["path"], output_path)
+            res = {
+                "success": True,
+                "output_file": output_path,
+                "tool": cand["tool"],
+                "shift_seconds": cand["shift_seconds"],
+                "ref_type": ref_type,
+                "verified_matched": cand["verified_matched"],
+                "post_offset_seconds": cand["post_offset_seconds"],
+                "post_drift_seconds": cand["post_drift_seconds"],
+                "tools_tried": tools_tried,
+            }
+            if cand.get("sync_mode"):
+                res["sync_mode"] = cand["sync_mode"]
+            return res
 
-    _cleanup_ref_file()
+        # 0.5. Local Multi-Window Mathematical Solver (handles FPS a*t+b, constant, piecewise)
+        if ref_sub_path and os.path.exists(ref_sub_path):
+            try:
+                local_ref_data = _build_local_ref_data_from_srt(ref_sub_path)
+                if local_ref_data:
+                    raw_sub_text = None
+                    for enc in ("utf-8-sig", "utf-8", "cp1256", "windows-1256", "iso-8859-6"):
+                        try:
+                            with open(subtitle_path, "r", encoding=enc) as sf:
+                                raw_sub_text = sf.read().replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+                            break
+                        except Exception:
+                            continue
+                    if raw_sub_text:
+                        sub_cues = _parse_srt_all_cues_from_text(raw_sub_text)
+                        math_model = _solve_stream_sync_model(local_ref_data, sub_cues)
+                        m_mode = math_model.get("mode")
+                        if math_model.get("tier") in (0, 1) and m_mode in ("constant", "affine", "piecewise"):
+                            tools_tried.append(f"math_solver_{m_mode}")
+                            transformed_txt = _apply_stream_sync_model(raw_sub_text, math_model)
+                            cand_math = f"{base_out}.math{ext_out}"
+                            with open(cand_math, "w", encoding="utf-8-sig", newline="\n") as mf:
+                                mf.write(transformed_txt)
+                            if m_mode == "affine":
+                                fps_precorrected_path = f"{base_out}.fps_pre{ext_out}"
+                                shutil.copy2(cand_math, fps_precorrected_path)
+                            matched_math = _evaluate_candidate(f"math_solver_{m_mode}", cand_math, sync_mode=m_mode)
+                            if (
+                                matched_math
+                                and best_candidate
+                                and abs(best_candidate["post_offset_seconds"]) <= 0.25
+                                and best_candidate["post_drift_seconds"] <= 0.20
+                            ):
+                                return _return_cand(best_candidate)
+            except Exception:
+                pass
 
-    if best_candidate and os.path.exists(best_candidate["path"]):
-        shutil.move(best_candidate["path"], output_path)
-        return {
-            "success": True,
-            "output_file": output_path,
-            "tool": best_candidate["tool"],
-            "shift_seconds": best_candidate["shift_seconds"],
-            "ref_type": ref_type,
-            "verified_matched": best_candidate["verified_matched"],
-            "post_offset_seconds": best_candidate["post_offset_seconds"],
-            "post_drift_seconds": best_candidate["post_drift_seconds"],
-            "tools_tried": tools_tried
-        }
+        # 1. Tool 1: alass (try FPS pre-corrected first when affine detected, then original)
+        alass_bin = get_alass_bin()
+        if alass_bin:
+            if fps_precorrected_path and os.path.exists(fps_precorrected_path):
+                tools_tried.append("alass_post_fps")
+                cand_alass_fps = f"{base_out}.alass_fps{ext_out}"
+                try:
+                    subprocess.run([alass_bin, sync_source, fps_precorrected_path, cand_alass_fps], capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
+                    if _evaluate_candidate("alass_post_fps", cand_alass_fps, sync_mode="affine"):
+                        return _return_cand(best_candidate)
+                except Exception:
+                    pass
 
-    return {"error": True, "message": f"تعذر ضبط التوقيت عبر الأدوات ({', '.join(tools_tried)})"}
+            tools_tried.append("alass")
+            cand_alass = f"{base_out}.alass{ext_out}"
+            try:
+                subprocess.run([alass_bin, sync_source, subtitle_path, cand_alass], capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
+                if _evaluate_candidate("alass", cand_alass):
+                    return _return_cand(best_candidate)
+            except Exception:
+                pass
+
+        # 2. Tool 2: lapse (AutoSubSync bundled engine)
+        lapse_bin = _get_lapse_bin()
+        if lapse_bin:
+            tools_tried.append("lapse")
+            cand_lapse = f"{base_out}.lapse{ext_out}"
+            try:
+                subprocess.run(
+                    [lapse_bin, sync_source, subtitle_path, "auto", "--output", cand_lapse, "--no-backup", "--no-sidecar", "--encoding", "utf8-bom", "--quiet"],
+                    capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
+                )
+                if _evaluate_candidate("lapse", cand_lapse):
+                    return _return_cand(best_candidate)
+            except Exception:
+                pass
+
+        # 3. Tool 3: ffsubsync (--gss across full file for FPS + offset search)
+        ffs_bin = _get_ffsubsync_bin()
+        if ffs_bin:
+            tools_tried.append("ffsubsync")
+            cand_ffs = f"{base_out}.ffsubsync{ext_out}"
+            try:
+                max_off = "180" if ref_type == "embedded_sub" else "120"
+                subprocess.run(
+                    [ffs_bin, sync_source, "-i", subtitle_path, "-o", cand_ffs, "--gss", "--max-offset-seconds", max_off],
+                    capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
+                )
+                if _evaluate_candidate("ffsubsync", cand_ffs):
+                    return _return_cand(best_candidate)
+            except Exception:
+                pass
+
+        # 4. Tool 4: autosubsync / subsync
+        auto_bin = _get_autosubsync_bin()
+        if auto_bin:
+            tools_tried.append("autosubsync")
+            cand_auto = f"{base_out}.autosubsync{ext_out}"
+            try:
+                subprocess.run(
+                    [auto_bin, video_path, subtitle_path, cand_auto],
+                    capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace"
+                )
+                if _evaluate_candidate("autosubsync", cand_auto):
+                    return _return_cand(best_candidate)
+            except Exception:
+                pass
+
+        if best_candidate and os.path.exists(best_candidate["path"]):
+            return _return_cand(best_candidate)
+
+        return {"error": True, "message": f"تعذر ضبط التوقيت عبر الأدوات ({', '.join(tools_tried)})"}
+    finally:
+        _cleanup_temps()
 
 
 # Keep backwards-compatible alias
@@ -1612,6 +1879,882 @@ def compare_embedded_vs_external_sub(video_path, sub_path, auto_fix=False):
     if auto_fix:
         return sync_subtitle_with_alass(video_path, sub_path)
     return {"status": "UNVERIFIED"}
+
+
+# ==========================================
+# Multi-Window Ground-Truth Stream Sync Engine (Text / PGS / Audio VAD)
+# ==========================================
+def extract_stream_reference_timestamps(media_url, is_series=False, timeout=28):
+    """
+    Extracts ground-truth reference timestamps directly from an HTTP stream (or local file)
+    using ONE single ffprobe connection (respecting TorBox limits):
+      - Single metadata probe detects embedded Arabic tracks + best Text or Blu-ray PGS stream.
+      - Tier 1: Extracts packet PTS timestamps across 3 strategic 18s windows (filtering PGS DISPLAY size > 100).
+      - Tier 2: Audio VAD fallback (2 x 25s sequential chunks with exact first-packet PTS alignment).
+    """
+    if not media_url:
+        return None
+
+    ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+
+    try:
+        meta_cmd = [
+            ffprobe_bin, "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", media_url
+        ]
+        meta_res = subprocess.run(
+            meta_cmd, capture_output=True, text=True,
+            timeout=max(12, min(timeout, 20)), encoding="utf-8", errors="replace"
+        )
+        if meta_res.returncode != 0 or not meta_res.stdout:
+            return None
+        meta = json.loads(meta_res.stdout)
+    except Exception:
+        return None
+
+    fmt_info = meta.get("format") or {}
+    all_streams = meta.get("streams") or []
+    try:
+        duration = float(fmt_info.get("duration") or 0.0)
+    except Exception:
+        duration = 0.0
+    try:
+        bit_rate = float(fmt_info.get("bit_rate") or 0.0)
+    except Exception:
+        bit_rate = 0.0
+
+    video_fps = 23.976
+    video_fps_set = False
+    sub_streams = []
+    has_embedded_arabic = False
+    arabic_tracks = []
+
+    for st in all_streams:
+        ctype = st.get("codec_type")
+        cname = str(st.get("codec_name") or "").lower()
+        if ctype == "video" and not video_fps_set and cname not in ("mjpeg", "png", "bmp", "gif", "webp"):
+            r_fps = st.get("r_frame_rate") or st.get("avg_frame_rate") or ""
+            if "/" in r_fps:
+                num, den = r_fps.split("/", 1)
+                try:
+                    if float(den) > 0:
+                        video_fps = round(float(num) / float(den), 3)
+                        video_fps_set = True
+                except Exception:
+                    pass
+        elif ctype == "subtitle":
+            sub_streams.append(st)
+            tags = st.get("tags") or {}
+            lang = str(tags.get("language") or "und").lower()
+            title = str(tags.get("title") or "")
+            if lang in ("ar", "ara", "arabic") or "arabic" in title.lower() or "عربي" in title.lower():
+                has_embedded_arabic = True
+                arabic_tracks.append({
+                    "index": st.get("index"),
+                    "codec": st.get("codec_name") or "",
+                    "language": lang,
+                    "title": title,
+                })
+        if not duration and st.get("duration"):
+            try:
+                duration = max(duration, float(st.get("duration")))
+            except Exception:
+                pass
+
+    if has_embedded_arabic:
+        return {
+            "has_embedded_arabic": True,
+            "arabic_tracks": arabic_tracks,
+            "times": [],
+            "windows": [],
+            "duration": duration,
+            "fps": video_fps,
+            "source": "embedded_arabic",
+        }
+
+    eff_dur = duration or (2520.0 if is_series else 6600.0)
+    text_codecs = {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt"}
+    pgs_codecs = {"hdmv_pgs_subtitle"}
+
+    # Strict priority: 1) eng/en/ara/ar TEXT, 2) any TEXT, 3) eng/en/ara/ar PGS, 4) any PGS
+    cand_p1, cand_p2, cand_p3, cand_p4 = None, None, None, None
+    for pos, st in enumerate(sub_streams):
+        codec = str(st.get("codec_name") or "").lower()
+        tags = st.get("tags") or {}
+        lang = str(tags.get("language") or "").lower()
+        title = str(tags.get("title") or "").lower()
+        if (st.get("disposition") or {}).get("forced") == 1 or "forced" in title or "commentary" in title or "signs" in title:
+            continue
+        is_pref_lang = lang in ("eng", "en", "ara", "ar")
+        if codec in text_codecs:
+            if is_pref_lang and cand_p1 is None:
+                cand_p1 = (pos, False)
+            elif cand_p2 is None:
+                cand_p2 = (pos, False)
+        elif codec in pgs_codecs:
+            if is_pref_lang and cand_p3 is None:
+                cand_p3 = (pos, True)
+            elif cand_p4 is None:
+                cand_p4 = (pos, True)
+
+    chosen = cand_p1 or cand_p2 or cand_p3 or cand_p4
+
+    # Tier 1: Text or Blu-ray PGS packet extraction in ONE single ffprobe connection
+    if chosen is not None:
+        chosen_pos, is_pgs = chosen
+        if bit_rate > 50_000_000:
+            win_dur = 12
+        elif bit_rate > 20_000_000 or bit_rate <= 0:
+            win_dur = 15
+        else:
+            win_dur = 18
+
+        if is_series or eff_dur < 3600:
+            raw_wins = [
+                (max(75, int(eff_dur * 0.10)), win_dur),
+                (int(eff_dur * 0.36), win_dur),
+                (int(eff_dur * 0.62), win_dur),
+                (int(eff_dur * 0.82), win_dur),
+            ]
+        else:
+            raw_wins = [
+                (max(150, int(eff_dur * 0.10)), win_dur),
+                (int(eff_dur * 0.33), win_dur),
+                (int(eff_dur * 0.56), win_dur),
+                (int(eff_dur * 0.80), win_dur),
+            ]
+        intervals_arg = ",".join(f"{ws}%+{dur_w}" for ws, dur_w in raw_wins)
+        try:
+            pkt_cmd = [
+                ffprobe_bin, "-v", "quiet", "-print_format", "json",
+                "-select_streams", f"s:{chosen_pos}",
+                "-show_packets", "-show_entries", "packet=pts_time,size",
+                "-read_intervals", intervals_arg,
+                media_url,
+            ]
+            pkt_res = subprocess.run(
+                pkt_cmd, capture_output=True, text=True,
+                timeout=max(75, timeout), encoding="utf-8", errors="replace"
+            )
+            if pkt_res.returncode == 0 and pkt_res.stdout:
+                pkts = json.loads(pkt_res.stdout).get("packets") or []
+                max_valid_t = eff_dur + 60.0
+                pts_list = []
+                for p in pkts:
+                    if is_pgs and int(p.get("size") or 0) <= 100:
+                        continue
+                    t_val = p.get("pts_time")
+                    if t_val is not None:
+                        fv = float(t_val)
+                        if 1.0 <= fv <= max_valid_t:
+                            pts_list.append(fv)
+                clean = []
+                for val in sorted(pts_list):
+                    if not clean or (val - clean[-1]) > 0.30:
+                        clean.append(val)
+                if len(clean) >= 8:
+                    windows = [(max(0.0, ws - 5.0), ws + dur_w + 5.0) for ws, dur_w in raw_wins]
+                    return {
+                        "has_embedded_arabic": False,
+                        "arabic_tracks": [],
+                        "times": clean,
+                        "windows": windows,
+                        "duration": eff_dur,
+                        "fps": video_fps,
+                        "source": "pgs" if is_pgs else "text",
+                    }
+        except Exception:
+            pass
+
+    # Tier 2: Audio VAD fallback (ONLY when no Text/PGS stream yielded >= 8 cues)
+    try:
+        import tempfile
+        import wave
+        import webrtcvad
+    except ImportError:
+        return {
+            "has_embedded_arabic": False,
+            "arabic_tracks": [],
+            "times": [],
+            "windows": [],
+            "duration": eff_dur,
+            "fps": video_fps,
+            "source": "none",
+        }
+
+    aud_dur = 16 if bit_rate > 50_000_000 else 20
+    if is_series or eff_dur < 3600:
+        aud_wins = [(60, aud_dur), (max(180, int(eff_dur * 0.62)), aud_dur)]
+    else:
+        aud_wins = [(150, aud_dur), (max(600, int(eff_dur * 0.65)), aud_dur)]
+
+    all_onsets = []
+    valid_windows = []
+    vad = webrtcvad.Vad(2)
+    frame_ms = 30
+    frame_bytes = int(16000 * (frame_ms / 1000.0) * 2)
+
+    for ws, dur_w in aud_wins:
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mka_path = os.path.join(tmpdir, "chunk.mka")
+                wav_path = os.path.join(tmpdir, "chunk.wav")
+                fast_seek = max(0, int(ws) - 8)
+                cmd = [
+                    ffmpeg_bin, "-y", "-v", "quiet",
+                    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "3",
+                    "-ss", str(fast_seek), "-i", media_url,
+                    "-copyts", "-ss", str(int(ws)), "-t", str(int(dur_w)),
+                    "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
+                    "-c:a", "pcm_s16le", "-f", "matroska", mka_path,
+                ]
+                res = subprocess.run(cmd, capture_output=True, timeout=60)
+                if res.returncode != 0 or not os.path.exists(mka_path) or os.path.getsize(mka_path) < 30000:
+                    continue
+
+                actual_start = float(ws)
+                try:
+                    p_pts = subprocess.run(
+                        [ffprobe_bin, "-v", "error", "-select_streams", "a:0",
+                         "-show_packets", "-read_intervals", "%+#1",
+                         "-show_entries", "packet=pts_time", "-of", "csv=p=0", mka_path],
+                        capture_output=True, text=True, timeout=8, encoding="utf-8", errors="replace"
+                    )
+                    pts_lines = [ln.strip() for ln in (p_pts.stdout or "").splitlines() if ln.strip()]
+                    if pts_lines:
+                        actual_start = float(pts_lines[0])
+                    else:
+                        p_fmt = subprocess.run(
+                            [ffprobe_bin, "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", mka_path],
+                            capture_output=True, text=True, timeout=8, encoding="utf-8", errors="replace"
+                        )
+                        actual_start = float((p_fmt.stdout or "").strip())
+                except Exception:
+                    actual_start = float(ws)
+
+                subprocess.run(
+                    [ffmpeg_bin, "-y", "-v", "quiet", "-i", mka_path, "-c:a", "pcm_s16le", wav_path],
+                    capture_output=True, timeout=15
+                )
+                if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 30000:
+                    continue
+
+                win_onsets = []
+                in_speech = False
+                speech_run = 0
+                silence_run = 0
+                with wave.open(wav_path, "rb") as wf:
+                    t_rel = 0.0
+                    while True:
+                        buf = wf.readframes(frame_bytes // 2)
+                        if len(buf) < frame_bytes:
+                            break
+                        if vad.is_speech(buf, 16000):
+                            speech_run += 1
+                            silence_run = 0
+                            if not in_speech and speech_run >= 4 and t_rel >= 0.5:
+                                in_speech = True
+                                onset = round(actual_start + t_rel - (3 * frame_ms / 1000.0), 3)
+                                if not win_onsets or (onset - win_onsets[-1]) > 0.45:
+                                    win_onsets.append(onset)
+                        else:
+                            silence_run += 1
+                            speech_run = 0
+                            if in_speech and silence_run >= 10:
+                                in_speech = False
+                        t_rel += frame_ms / 1000.0
+
+                if len(win_onsets) >= 3:
+                    all_onsets.extend(win_onsets)
+                    valid_windows.append((max(0.0, actual_start - 5.0), actual_start + dur_w + 5.0))
+        except Exception:
+            continue
+
+    if len(all_onsets) >= 5:
+        return {
+            "has_embedded_arabic": False,
+            "arabic_tracks": [],
+            "times": sorted(all_onsets),
+            "windows": valid_windows,
+            "duration": eff_dur,
+            "fps": video_fps,
+            "source": "audio",
+        }
+    return {
+        "has_embedded_arabic": False,
+        "arabic_tracks": [],
+        "times": [],
+        "windows": [],
+        "duration": eff_dur,
+        "fps": video_fps,
+        "source": "none",
+    }
+
+
+def _parse_srt_all_cues_from_text(srt_text):
+    """Returns list of (start_sec, end_sec) for all valid dialogue cues in an SRT string."""
+    cues = []
+    pattern = r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+    for m in re.finditer(pattern, srt_text or ""):
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        st = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
+        et = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
+        if st >= 0.5 and et > st:
+            cues.append((st, et))
+    return cues
+
+
+def _find_window_offset_consensus(ref_w, sub_w, max_shift=90.0, tol=0.55):
+    """Finds the best constant offset (ref - sub) inside a single time window using 1-to-1 consensus voting."""
+    if len(ref_w) < 2 or len(sub_w) < 2:
+        return 0.0, 0, 0.0
+
+    sub_w_sorted = sorted(sub_w)
+    candidates = []
+    for r in ref_w:
+        lo = bisect.bisect_left(sub_w_sorted, r - max_shift)
+        hi = bisect.bisect_right(sub_w_sorted, r + max_shift)
+        for s in sub_w_sorted[lo:hi]:
+            candidates.append(r - s)
+
+    if not candidates:
+        return 0.0, 0, 0.0
+
+    bins = Counter(round(c * 5) / 5.0 for c in candidates)
+    top_centers = [b for b, _ in bins.most_common(8)]
+    if 0.0 not in top_centers:
+        top_centers.append(0.0)
+    best_inliers = []
+    best_med_abs = float("inf")
+
+    for cand in top_centers:
+        inliers = []
+        for r in ref_w:
+            closest_s = _nearest_sorted_val(sub_w_sorted, r - cand)
+            if abs((r - cand) - closest_s) <= tol:
+                inliers.append(r - closest_s)
+        if inliers:
+            med_abs = abs(sorted(inliers)[len(inliers) // 2])
+            if len(inliers) > len(best_inliers) or (len(inliers) == len(best_inliers) and med_abs < best_med_abs):
+                best_inliers = inliers
+                best_med_abs = med_abs
+
+    if not best_inliers:
+        return 0.0, 0, 0.0
+
+    best_inliers.sort()
+    median_off = best_inliers[len(best_inliers) // 2]
+    refined = []
+    for r in ref_w:
+        closest_s = _nearest_sorted_val(sub_w_sorted, r - median_off)
+        if abs((r - median_off) - closest_s) <= tol:
+            refined.append(r - closest_s)
+    if refined:
+        refined.sort()
+        median_off = refined[len(refined) // 2]
+        best_inliers = refined
+
+    denom = max(1, min(len(ref_w), len(sub_w)))
+    ratio = len(best_inliers) / float(denom)
+    return round(median_off, 3), len(best_inliers), ratio
+
+
+def _evaluate_transform_windows(ref_data, sub_starts, transform_fn, tol=0.55):
+    """
+    Evaluates a timestamp transformation f(t) across all sampled reference windows
+    using 1-to-1 per-reference-cue matching (0 <= total_inliers <= len(ref_times)).
+    Returns (total_inliers, matched_windows_count, active_windows_count, median_residual_ms).
+    """
+    ref_times = ref_data.get("times") or []
+    windows = ref_data.get("windows") or [(10.0, 180.0)]
+    transformed = [transform_fn(s) for s in sub_starts]
+
+    total_inliers = 0
+    matched_windows = 0
+    active_windows = 0
+    residuals = []
+
+    for ws, we in windows:
+        ref_w = [r for r in ref_times if ws <= r <= we]
+        if len(ref_w) < 2:
+            continue
+        active_windows += 1
+        sub_w = sorted(t for t in transformed if (ws - 1.5) <= t <= (we + 1.5))
+        inliers = 0
+        if sub_w:
+            for r in ref_w:
+                closest_t = _nearest_sorted_val(sub_w, r)
+                err = abs(r - closest_t)
+                if err <= tol:
+                    inliers += 1
+                    residuals.append(err * 1000.0)
+        req_w = max(2, min(len(ref_w), max(2, len(sub_w))) // 3)
+        if inliers >= req_w:
+            matched_windows += 1
+        total_inliers += inliers
+
+    med_res_ms = round(sorted(residuals)[len(residuals) // 2], 1) if residuals else None
+    return total_inliers, matched_windows, max(1, active_windows), med_res_ms
+
+
+def _solve_stream_sync_model(ref_data, sub_cues):
+    """
+    Solves for the optimal full-video sync model across all sampled windows:
+      - Model 0 ('natural' / micro-offset): 0 or tiny uniform shift verified across windows.
+      - Model 1 ('constant'): t' = t + b verified across windows.
+      - Model 2 ('affine'): t' = a * t + b (fixes 25fps <-> 23.976fps/24fps PAL/NTSC drift).
+      - Model 3 ('piecewise'): per-act shifts snapped to scene gaps.
+    Includes anti-damage guardrails for single-window fallback, audio VAD, natural sync, and affine fitting.
+    """
+    if not ref_data or not ref_data.get("times") or len(sub_cues) < 5:
+        return {"mode": "none", "a": 1.0, "b": 0.0, "segments": [], "tier": 2, "score": 0, "win_ok": 0, "active_windows": 0, "post_inliers": 0, "median_residual_ms": None, "label": ""}
+
+    ref_times = ref_data["times"]
+    windows = ref_data.get("windows") or [(10.0, 180.0)]
+    source = ref_data.get("source", "")
+    is_sub_ref = source in ("text", "pgs", "local_srt")
+    tight_tol = 0.35 if source == "audio" else 0.25
+    loose_tol = 0.68 if source == "audio" else 0.48
+    tol = loose_tol
+    sub_starts = [c[0] for c in sub_cues]
+    sub_starts_sorted = sorted(sub_starts)
+
+    def _score_model(transform_fn):
+        t_inl, t_wok, aw, t_res = _evaluate_transform_windows(ref_data, sub_starts, transform_fn, tol=tight_tol)
+        l_inl, l_wok, _, l_res = _evaluate_transform_windows(ref_data, sub_starts, transform_fn, tol=loose_tol)
+        res_pen = (l_res if l_res is not None else 500.0) / 50.0
+        sc = round((t_inl * 4.0) + (l_inl * 1.5) + (t_wok * 12.0) + (l_wok * 6.0) - res_pen, 2)
+        return t_inl, l_inl, t_wok, l_wok, aw, t_res, l_res, sc
+
+    nat_t_inl, nat_inliers, nat_t_wok, nat_win_ok, active_wins, nat_t_res, nat_res_ms, nat_score = _score_model(
+        lambda t: t
+    )
+
+    win_stats = []
+    for ws, we in windows:
+        ref_w = [r for r in ref_times if ws <= r <= we]
+        if len(ref_w) < 2:
+            continue
+        sub_w = [s for s in sub_starts if (ws - 90.0) <= s <= (we + 90.0)]
+        off_w, cnt_w, rat_w = _find_window_offset_consensus(ref_w, sub_w, max_shift=90.0, tol=tol)
+        req_w = max(2, min(len(ref_w), 8) // 3)
+        if cnt_w >= req_w:
+            center_t = 0.5 * (ws + we) - off_w
+            win_stats.append((center_t, off_w, cnt_w, rat_w, ws, we))
+
+    if win_stats:
+        all_small_offsets = all(abs(w[1]) <= 0.35 for w in win_stats)
+        if all_small_offsets and len(win_stats) >= max(1, active_wins - 1):
+            avg_off = sum(w[1] * w[2] for w in win_stats) / max(1, sum(w[2] for w in win_stats))
+            if abs(avg_off) <= 0.12:
+                return {
+                    "mode": "natural",
+                    "a": 1.0,
+                    "b": 0.0,
+                    "segments": [],
+                    "tier": 0,
+                    "score": nat_score + 50.0,
+                    "win_ok": nat_win_ok,
+                    "active_windows": active_wins,
+                    "tight_inliers": nat_t_inl,
+                    "post_inliers": nat_inliers,
+                    "median_residual_ms": nat_res_ms,
+                    "label": "✅ متزامنة أصلياً",
+                }
+            if active_wins >= 2 or (is_sub_ref and len(win_stats) >= 1 and abs(avg_off) <= 0.35):
+                micro_off = round(avg_off, 3)
+                m_t_inl, m_inl, _, m_ok, _, _, m_res, m_sc = _score_model(lambda t, b=micro_off: t + b)
+                if m_sc >= nat_score and m_ok >= nat_win_ok:
+                    return {
+                        "mode": "constant",
+                        "a": 1.0,
+                        "b": micro_off,
+                        "segments": [],
+                        "tier": 0,
+                        "score": m_sc + 50.0,
+                        "win_ok": m_ok,
+                        "active_windows": active_wins,
+                        "tight_inliers": m_t_inl,
+                        "post_inliers": m_inl,
+                        "median_residual_ms": m_res,
+                        "label": f"✅ متزامنة (ضبط دقيق {micro_off:+.2f}s)",
+                    }
+
+    best_model = {
+        "mode": "natural",
+        "a": 1.0,
+        "b": 0.0,
+        "segments": [],
+        "tier": 0 if (nat_win_ok == active_wins and active_wins > 0) else 2,
+        "score": nat_score,
+        "win_ok": nat_win_ok,
+        "active_windows": active_wins,
+        "tight_inliers": nat_t_inl,
+        "post_inliers": nat_inliers,
+        "median_residual_ms": nat_res_ms,
+        "label": "✅ متزامنة أصلياً" if nat_win_ok == active_wins else "",
+    }
+
+    nat_is_strong = (
+        nat_win_ok == active_wins
+        and active_wins >= 2
+        and nat_t_inl >= max(5, int(0.30 * len(ref_times)))
+        and nat_res_ms is not None
+        and nat_res_ms <= 180.0
+    )
+
+    # Global Constant Consensus across ALL windows together
+    cand_offsets = set(round(w[1], 3) for w in win_stats)
+    if win_stats:
+        weighted_b = sum(w[1] * w[2] for w in win_stats) / max(1, sum(w[2] for w in win_stats))
+        cand_offsets.add(round(weighted_b, 3))
+
+    global_diffs = []
+    for r in ref_times:
+        lo = bisect.bisect_left(sub_starts_sorted, r - 90.0)
+        hi = bisect.bisect_right(sub_starts_sorted, r + 90.0)
+        for s in sub_starts_sorted[lo:hi]:
+            global_diffs.append(r - s)
+    if global_diffs:
+        g_bins = Counter(round(d * 10) / 10.0 for d in global_diffs)
+        g_centers = [b for b, _ in g_bins.most_common(10)]
+        if 0.0 not in g_centers:
+            g_centers.append(0.0)
+        for gc in g_centers:
+            g_inliers = []
+            for r in ref_times:
+                closest_s = _nearest_sorted_val(sub_starts_sorted, r - gc)
+                if abs((r - gc) - closest_s) <= tol:
+                    g_inliers.append(r - closest_s)
+            if g_inliers:
+                g_inliers.sort()
+                cand_offsets.add(round(g_inliers[len(g_inliers) // 2], 3))
+
+    best_const_inliers = nat_inliers
+    for b_cand in sorted(cand_offsets, key=lambda x: abs(x)):
+        if active_wins < 2:
+            if source == "audio" and abs(b_cand) > 1.0:
+                continue
+            if abs(b_cand) > 10.0:
+                continue
+
+        t_inl, inl, t_wok, w_ok, _, t_res, r_ms, sc = _score_model(lambda t, b=b_cand: t + b)
+        if inl > best_const_inliers:
+            best_const_inliers = inl
+
+        if active_wins < 2:
+            if abs(b_cand) > 0.005:
+                req_single_inl = max(nat_inliers + 4, int(0.65 * len(ref_times)), 6)
+                if inl < req_single_inl or r_ms is None or r_ms > 220.0:
+                    continue
+        elif source == "audio" and abs(b_cand) > 0.5:
+            req_aud_inl = max(nat_inliers + 3, int(0.45 * len(ref_times)), 6)
+            if w_ok < 2 or inl < req_aud_inl:
+                continue
+
+        if nat_is_strong and abs(b_cand) > 1.0:
+            if sc <= (nat_score + 20.0) or t_inl < (nat_t_inl + 3):
+                continue
+
+        if w_ok >= min(2, active_wins) and inl >= nat_inliers:
+            if w_ok == active_wins and abs(b_cand) <= 0.12 and nat_win_ok == active_wins and nat_score >= (sc - 2.0):
+                if best_model["score"] <= nat_score:
+                    best_model = {
+                        "mode": "natural",
+                        "a": 1.0,
+                        "b": 0.0,
+                        "segments": [],
+                        "tier": 0,
+                        "score": nat_score,
+                        "win_ok": nat_win_ok,
+                        "active_windows": active_wins,
+                        "tight_inliers": nat_t_inl,
+                        "post_inliers": nat_inliers,
+                        "median_residual_ms": nat_res_ms,
+                        "label": "✅ متزامنة أصلياً",
+                    }
+            elif sc > best_model["score"] or (w_ok > best_model["win_ok"] and t_inl >= best_model.get("tight_inliers", 0)):
+                sign = "+" if b_cand >= 0 else ""
+                is_micro = abs(b_cand) <= 0.35 and w_ok == active_wins
+                best_model = {
+                    "mode": "constant",
+                    "a": 1.0,
+                    "b": b_cand,
+                    "segments": [],
+                    "tier": 0 if is_micro else 1,
+                    "score": sc,
+                    "win_ok": w_ok,
+                    "active_windows": active_wins,
+                    "tight_inliers": t_inl,
+                    "post_inliers": inl,
+                    "median_residual_ms": r_ms,
+                    "label": f"✅ متزامنة (ضبط دقيق {sign}{b_cand:.2f}s)" if is_micro else f"🔄 تمت المزامنة ({sign}{b_cand:.2f}s)",
+                }
+
+    # Strict Natural/Micro Protection Gate: ONLY protect genuine natural or <=0.50s micro-offset!
+    # NEVER short-circuit affine for large shifts (like +20.49s or -69.87s).
+    if (
+        active_wins >= 2
+        and abs(best_model.get("b", 0.0)) <= 0.50
+        and best_model["win_ok"] == active_wins
+        and best_model.get("tight_inliers", 0) >= max(5, int(0.30 * len(ref_times)))
+        and best_model["post_inliers"] >= max(6, int(0.40 * len(ref_times)))
+        and best_model["median_residual_ms"] is not None
+        and best_model["median_residual_ms"] <= 200.0
+    ):
+        return best_model
+
+    # Affine FPS (25fps <-> 23.976fps / 24fps) & Piecewise: strictly require >= 2 active windows
+    if active_wins >= 2:
+        fps_ratios = [
+            25.0 / 23.976024,
+            23.976024 / 25.0,
+            24.0 / 23.976024,
+            23.976024 / 24.0,
+            25.0 / 24.0,
+            24.0 / 25.0,
+        ]
+        affine_candidates = []
+        for a_rat in fps_ratios:
+            for ws, we in windows[:2]:
+                ref_w = [r for r in ref_times if ws <= r <= we]
+                sub_w = [a_rat * s for s in sub_starts if (ws - 90.0) <= (a_rat * s) <= (we + 90.0)]
+                b_est, cnt_est, _ = _find_window_offset_consensus(ref_w, sub_w, max_shift=90.0, tol=tol)
+                if cnt_est >= 2:
+                    affine_candidates.append((a_rat, b_est))
+
+            # Global consensus across all ref_times for a_rat within +-60s (protects against sparse window 1 + intro logo offset)
+            scaled_subs = sorted(a_rat * s for s in sub_starts)
+            g_aff_diffs = []
+            for r in ref_times:
+                lo = bisect.bisect_left(scaled_subs, r - 60.0)
+                hi = bisect.bisect_right(scaled_subs, r + 60.0)
+                for ss in scaled_subs[lo:hi]:
+                    g_aff_diffs.append(r - ss)
+            if g_aff_diffs and scaled_subs:
+                aff_bins = Counter(round(d * 5) / 5.0 for d in g_aff_diffs)
+                for pk, _ in aff_bins.most_common(3):
+                    inl_b = []
+                    for r in ref_times:
+                        cs = _nearest_sorted_val(scaled_subs, r - pk)
+                        if abs((r - pk) - cs) <= tol:
+                            inl_b.append(r - cs)
+                    if len(inl_b) >= 3:
+                        inl_b.sort()
+                        affine_candidates.append((a_rat, round(inl_b[len(inl_b) // 2], 3)))
+
+        if len(win_stats) >= 3 and is_sub_ref:
+            for i in range(len(win_stats)):
+                for j in range(i + 1, len(win_stats)):
+                    t1, off1 = win_stats[i][0], win_stats[i][1]
+                    t2, off2 = win_stats[j][0], win_stats[j][1]
+                    if (t2 - t1) >= 250.0 and abs(off2 - off1) >= 0.45:
+                        a_emp = 1.0 + (off2 - off1) / (t2 - t1)
+                        if 0.95 <= a_emp <= 1.05:
+                            b_emp = off1 - (a_emp - 1.0) * t1
+                            if abs(b_emp) <= 60.0:
+                                affine_candidates.append((a_emp, round(b_emp, 3)))
+
+        min_aff_wins = max(2, active_wins - 1)
+        min_aff_tight = max(5, int(0.35 * len(ref_times)))
+        min_aff_loose = max(nat_inliers + 3, int(0.45 * len(ref_times)), 6)
+        seen_aff = set()
+        for a_cand, b_cand in affine_candidates:
+            if abs(b_cand) > 65.0:
+                continue
+            key_aff = (round(a_cand, 7), round(b_cand, 3))
+            if key_aff in seen_aff:
+                continue
+            seen_aff.add(key_aff)
+            t_inl, l_inl, t_wok, l_wok, _, t_res, l_res, sc = _score_model(
+                lambda t, a=a_cand, b=b_cand: a * t + b
+            )
+            if (
+                l_wok >= min_aff_wins
+                and t_inl >= min_aff_tight
+                and l_inl >= min_aff_loose
+                and l_res is not None
+                and l_res <= 200.0
+                and sc > (best_model["score"] + 12.0)
+            ):
+                best_model = {
+                    "mode": "affine",
+                    "a": round(a_cand, 7),
+                    "b": b_cand,
+                    "segments": [],
+                    "tier": 1,
+                    "score": sc,
+                    "win_ok": l_wok,
+                    "active_windows": active_wins,
+                    "tight_inliers": t_inl,
+                    "post_inliers": l_inl,
+                    "median_residual_ms": l_res,
+                    "label": "🔄 تمت المزامنة (ضبط FPS + التوقيت)",
+                }
+
+        if is_sub_ref and len(win_stats) >= 2 and best_model.get("win_ok", 0) < len(win_stats):
+            offsets_seq = [w[1] for w in win_stats]
+            if (max(offsets_seq) - min(offsets_seq)) >= 0.60:
+                segments = []
+                for idx, w in enumerate(win_stats):
+                    seg_off = w[1]
+                    if idx == 0:
+                        seg_start = 0.0
+                    else:
+                        prev_we = win_stats[idx - 1][5] - win_stats[idx - 1][1]
+                        curr_ws = w[4] - w[1]
+                        best_gap_mid = 0.5 * (prev_we + curr_ws)
+                        best_gap_dur = 0.0
+                        for c_i in range(len(sub_cues) - 1):
+                            end_curr = sub_cues[c_i][1]
+                            start_next = sub_cues[c_i + 1][0]
+                            if prev_we - 20.0 <= end_curr <= curr_ws + 20.0:
+                                gap = start_next - end_curr
+                                if gap > best_gap_dur:
+                                    best_gap_dur = gap
+                                    best_gap_mid = 0.5 * (end_curr + start_next)
+                        seg_start = best_gap_mid
+                    segments.append([seg_start, 999999.0, seg_off])
+                    if idx > 0:
+                        segments[idx - 1][1] = seg_start
+
+                def _piecewise_fn(t, segs=segments):
+                    for s_st, s_et, s_off in segs:
+                        if s_st <= t < s_et:
+                            return t + s_off
+                    return t + segs[-1][2]
+
+                t_inl, l_inl, t_wok, l_wok, _, t_res, l_res, sc = _score_model(_piecewise_fn)
+                if (
+                    l_wok >= 2
+                    and l_wok > best_model.get("win_ok", 0)
+                    and l_inl >= max(nat_inliers, best_const_inliers) + 3
+                    and sc > (best_model["score"] + 15.0)
+                ):
+                    best_model = {
+                        "mode": "piecewise",
+                        "a": 1.0,
+                        "b": 0.0,
+                        "segments": segments,
+                        "tier": 1,
+                        "score": sc,
+                        "win_ok": l_wok,
+                        "active_windows": active_wins,
+                        "tight_inliers": t_inl,
+                        "post_inliers": l_inl,
+                        "median_residual_ms": l_res,
+                        "label": "🔄 تمت المزامنة (متعددة الفصول)",
+                    }
+
+    return best_model
+
+
+def _apply_stream_sync_model(srt_text, model):
+    """Applies Constant, Affine (FPS a*t+b), or Piecewise shift to all SRT timestamps, then applies fix_arabic_rtl_text."""
+    if not model or model.get("mode") in (None, "none", "natural"):
+        return fix_arabic_rtl_text(srt_text)
+
+    mode = model.get("mode")
+    a = float(model.get("a", 1.0))
+    b = float(model.get("b", 0.0))
+    segments = model.get("segments") or []
+
+    if mode == "constant" and abs(b) < 0.005:
+        return fix_arabic_rtl_text(srt_text)
+
+    def _transform_sec(sec):
+        if mode == "constant":
+            return sec + b
+        if mode == "affine":
+            return (a * sec) + b
+        if mode == "piecewise" and segments:
+            for s_st, s_et, s_off in segments:
+                if s_st <= sec < s_et:
+                    return sec + s_off
+            return sec + segments[-1][2]
+        return sec
+
+    def _fmt(ms_val):
+        nh = ms_val // 3600000
+        nm = (ms_val % 3600000) // 60000
+        ns = (ms_val % 60000) // 1000
+        nms = ms_val % 1000
+        return f"{nh:02d}:{nm:02d}:{ns:02d},{nms:03d}"
+
+    def _shift_match(m):
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        st_sec = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
+        et_sec = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
+        new_st_ms = max(0, int(round(_transform_sec(st_sec) * 1000)))
+        new_et_ms = max(new_st_ms + 450, int(round(_transform_sec(et_sec) * 1000)))
+        return f"{_fmt(new_st_ms)} --> {_fmt(new_et_ms)}"
+
+    pattern = r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+    shifted_text = re.sub(pattern, _shift_match, srt_text)
+    return fix_arabic_rtl_text(shifted_text)
+
+
+def solve_and_apply_stream_sync(sub_paths, ref_data):
+    """
+    Applies the multi-window sync model (Natural / Constant / FPS Affine / Piecewise)
+    + bulletproof Arabic RTL un-reverser across all downloaded stream subtitles.
+    """
+    if isinstance(sub_paths, str):
+        sub_paths = [sub_paths]
+    sub_paths = [s for s in sub_paths if s and os.path.exists(s)]
+    if not sub_paths:
+        return {"synced": False, "reason": "no_subtitles", "details": []}
+
+    details = []
+    for sp in sub_paths:
+        raw_text = None
+        for enc in ("utf-8-sig", "utf-8", "windows-1256", "cp1256", "iso-8859-6"):
+            try:
+                with open(sp, "r", encoding=enc) as f:
+                    raw_text = f.read().replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+                break
+            except Exception:
+                continue
+        if not raw_text:
+            details.append({"file": os.path.basename(sp), "path": sp, "mode": "unreadable", "tier": 2, "win_ok": 0})
+            continue
+
+        cleaned_text = fix_arabic_rtl_text(raw_text)
+        cues = _parse_srt_all_cues_from_text(cleaned_text)
+        model = _solve_stream_sync_model(ref_data, cues) if (ref_data and ref_data.get("times")) else {
+            "mode": "none", "a": 1.0, "b": 0.0, "tier": 2, "win_ok": 0, "active_windows": 0, "post_inliers": 0, "median_residual_ms": None, "label": ""
+        }
+
+        if model.get("tier") in (0, 1):
+            final_text = _apply_stream_sync_model(cleaned_text, model)
+        else:
+            final_text = cleaned_text
+
+        with open(sp, "w", encoding="utf-8-sig", newline="\n") as out_f:
+            out_f.write(final_text)
+
+        details.append({
+            "file": os.path.basename(sp),
+            "path": sp,
+            "mode": model.get("mode", "none"),
+            "a": model.get("a", 1.0),
+            "b": model.get("b", 0.0),
+            "tier": model.get("tier", 2),
+            "win_ok": model.get("win_ok", 0),
+            "active_windows": model.get("active_windows", 0),
+            "post_inliers": model.get("post_inliers", 0),
+            "median_residual_ms": model.get("median_residual_ms"),
+            "label": model.get("label", ""),
+        })
+
+    return {
+        "synced": bool(ref_data and ref_data.get("times")),
+        "source": (ref_data or {}).get("source", "none"),
+        "windows_count": len((ref_data or {}).get("windows", [])),
+        "ref_cues_count": len((ref_data or {}).get("times", [])),
+        "details": details,
+    }
 
 
 # ==========================================
@@ -2013,7 +3156,10 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
                 pass
             shift_s = sync_res.get("shift_seconds", 0.0)
             tool_u = sync_res.get("tool", "alass")
-            if tool_u != "already_matched" and abs(shift_s) > 0.45:
+            sync_mode = sync_res.get("sync_mode", "")
+            if sync_mode == "affine" or "affine" in str(tool_u):
+                label_synced = f"{label} (Synced FPS)"
+            elif tool_u != "already_matched" and abs(shift_s) > 0.35:
                 label_synced = f"{label} (Synced {shift_s:+.1f}s)"
             else:
                 label_synced = label
@@ -2042,6 +3188,10 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
             os.remove(ref_sub)
         except Exception:
             pass
+
+    # Verified-first track ordering so default MKV track (#1) is always verified in-sync
+    if synced_results:
+        synced_results.sort(key=lambda r: 0 if r.get("verified_matched") else 1)
 
     # Update main <video_stem>.srt and <video_stem>.ar.srt inside the subtitles folder
     if synced_results:
