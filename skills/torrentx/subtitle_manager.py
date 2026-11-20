@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 import sys
 import json
@@ -119,6 +119,8 @@ def fix_arabic_rtl_text(sub_text):
     """
     sub_text = clean_subtitle_ads(sub_text)
     sub_text = re.sub(r"\{\\[^}]*\}", "", sub_text)
+    # Strip WebVTT inline class/voice tags like <c.white>, </c>, <v Name>, </v>
+    sub_text = re.sub(r"</?(?:c(?:\.[^>]*)?|v(?:\s+[^>]*)?|lang(?:\s+[^>]*)?)>", "", sub_text, flags=re.I)
     RLM = "\u200F"
     RLE = "\u202B"
     PDF = "\u202C"
@@ -128,7 +130,7 @@ def fix_arabic_rtl_text(sub_text):
     ts_pattern = re.compile(r"^\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}")
     arabic_pattern = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
     trailing_punct = re.compile(r"([.!?؟:;،,\-\'\"\)\]\}]+)$")
-    leading_punct = re.compile(r"^([.!؟:;،,]+)\s*([\u0600-\u06FF].*)")
+    leading_punct = re.compile(r"^([.!؟:;،,]+)\s*(.+)")
 
     for line in lines:
         stripped = line.strip()

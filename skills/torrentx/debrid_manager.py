@@ -2253,6 +2253,7 @@ def _sync_subs_for_stream_url(stream_url, sub_paths):
         _ensure_utf8_bom_rtl(sp)
 
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
     alass_bin = subtitle_manager.get_alass_bin() if hasattr(subtitle_manager, "get_alass_bin") else shutil.which("alass")
     if not alass_bin:
         return {"synced": False, "reason": "alass_not_found"}
@@ -2260,11 +2261,12 @@ def _sync_subs_for_stream_url(stream_url, sub_paths):
     tmp_dir = os.path.join(os.environ.get("TEMP", "."), "torrentx_stream_sync")
     os.makedirs(tmp_dir, exist_ok=True)
     ts_id = int(time.time() * 1000)
+    mka_path = os.path.join(tmp_dir, f"sample_{ts_id}.mka")
     wav_path = os.path.join(tmp_dir, f"sample_{ts_id}.wav")
     window_sec = 45.0
     pad_sec = 0.0
     offset_sec = _pick_best_dialogue_window(sub_paths, window_sec=window_sec)
-    temp_files = [wav_path]
+    temp_files = [mka_path, wav_path]
     temp_lock = threading.Lock()
 
     try:
@@ -2276,12 +2278,32 @@ def _sync_subs_for_stream_url(stream_url, sub_paths):
             "-i", stream_url,
             "-copyts", "-ss", str(int(offset_sec)),
             "-t", str(int(window_sec)),
-            "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
-            wav_path
+            "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "matroska",
+            mka_path
         ]
         subprocess.run(ff_cmd, capture_output=True, text=True, timeout=55, encoding="utf-8", errors="replace")
-        if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 30000:
+        if not os.path.exists(mka_path) or os.path.getsize(mka_path) < 30000:
             return {"synced": False, "reason": "audio_sample_unavailable", "window_offset_sec": offset_sec}
+
+        # Read exact preserved PTS start_time from MKA so keyframe/packet offset error is 0.000s
+        actual_offset = offset_sec
+        try:
+            pr = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", mka_path],
+                capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace"
+            )
+            val = float((pr.stdout or "").strip())
+            if val > 1.0:
+                actual_offset = val
+        except Exception:
+            pass
+
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-i", mka_path, "-c:a", "pcm_s16le", wav_path],
+            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
+        )
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 30000:
+            return {"synced": False, "reason": "wav_convert_failed", "window_offset_sec": actual_offset}
 
         def _sync_one(idx_sp):
             idx, sp = idx_sp
@@ -2294,7 +2316,7 @@ def _sync_subs_for_stream_url(stream_url, sub_paths):
             if not blocks:
                 return {"file": os.path.basename(sp), "shift_seconds": 0.0, "status": "non_srt_or_empty"}
 
-            in_win = _extract_shifted_srt_window(blocks, offset_sec, window_sec, pad_sec, win_srt)
+            in_win = _extract_shifted_srt_window(blocks, actual_offset, window_sec, pad_sec, win_srt)
             if not in_win:
                 return {"file": os.path.basename(sp), "shift_seconds": 0.0, "status": "no_cues_in_window"}
 
