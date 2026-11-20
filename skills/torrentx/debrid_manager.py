@@ -659,7 +659,76 @@ def parse_size_gb(desc_text):
     return round(val / 1024.0, 2) if unit == "MB" else val
 
 
-def select_best_movie_release(streams, allow_upscale=False):
+def _is_release_identity_mismatch(release_text, expected_title=None, expected_year=None, is_series=False):
+    """
+    Detects mismatched Torrentio streams tagged under the wrong IMDb ID
+    (e.g. 'Demolition Man 4K (US Taco Bell version).mkv' tagged under Demolition 2016).
+    """
+    if not release_text or (not expected_title and not expected_year):
+        return False
+
+    clean = re.sub(r"\[[^\]]*\]", " ", str(release_text))
+    # Strip video resolution/codec numbers so 2160p/1080p/264/265 don't look like years
+    no_res = re.sub(r"\b(?:2160|1080|720|480|4320)p?\b|\b[xh]\.?26[45]\b", " ", clean, flags=re.I)
+
+    # 1. Year check (for movies)
+    has_matching_year = False
+    if not is_series and expected_year and str(expected_year).isdigit():
+        exp_y = int(expected_year)
+        found_years = [int(y) for y in re.findall(r"(?<!\d)(19\d{2}|20[0-3]\d)(?!\d)", no_res)]
+        if found_years:
+            if any(abs(y - exp_y) <= 1 for y in found_years):
+                has_matching_year = True
+            else:
+                return True
+
+    # 2. Title token check (using the release prefix before year/resolution/source/episode)
+    if expected_title:
+        stop_articles = {"the", "a", "an", "and", "of", "in", "on", "at", "to", "for"}
+        edition_words = {
+            "custom", "multi", "extended", "unrated", "remastered", "directors", "director",
+            "cut", "theatrical", "imax", "proper", "repack", "internal", "dubbed", "subbed",
+            "vf2", "vff", "truefrench", "french", "eng", "english", "us", "uk", "au", "hk",
+            "criterion", "hybrid", "hdr", "dv", "sdr", "uhd", "4k", "3d", "readnfo",
+        }
+        exp_tokens = [
+            t for t in re.findall(r"[a-z0-9]+", str(expected_title).lower())
+            if t not in stop_articles
+        ]
+        if not exp_tokens:
+            return False
+
+        # Cut release text at first year, resolution, SxxExx, or source tag
+        split_m = re.search(
+            r"(?:\b(?:19\d{2}|20[0-3]\d|2160p|1080p|720p|480p|4k|uhd|bluray|blu-ray|bdremux|remux|web-dl|webdl|webrip|hdrip|dvdrip|hdtv)\b|\bs\d{1,2}e\d{1,3}\b)",
+            clean,
+            re.I,
+        )
+        prefix = clean[:split_m.start()] if split_m else clean
+        prefix_tokens = [
+            t for t in re.findall(r"[a-z0-9]+", prefix.lower())
+            if t not in stop_articles and t not in edition_words
+        ]
+        all_tokens = set(re.findall(r"[a-z0-9]+", clean.lower()))
+
+        if not any(t in all_tokens for t in exp_tokens):
+            return True
+
+        if prefix_tokens:
+            overlap = sum(1 for t in exp_tokens if t in prefix_tokens)
+            if (overlap / float(len(exp_tokens))) < 0.5:
+                return True
+            # When the filename has NO matching year (e.g. 'Demolition Man 4K'), reject extra title words
+            # beyond expected_title (e.g. 'man' after 'demolition', or sequel '2'/'3'/'reloaded')
+            if not is_series and not has_matching_year:
+                extra = [t for t in prefix_tokens if t not in exp_tokens]
+                if extra and len(prefix_tokens) > len(exp_tokens):
+                    return True
+
+    return False
+
+
+def select_best_movie_release(streams, allow_upscale=False, expected_title=None, expected_year=None, is_series=False):
     """
     Implements the User's Strict Movie Quality Protocol:
     1. Reject AI Upscale by default (unless allow_upscale=True).
@@ -731,6 +800,9 @@ def select_best_movie_release(streams, allow_upscale=False):
             if l.lower().endswith((".mkv", ".mp4")):
                 clean_title = l
                 break
+
+        if _is_release_identity_mismatch(clean_title, expected_title=expected_title, expected_year=expected_year, is_series=is_series):
+            continue
 
         is_cached = any(tag in name for tag in ["[RD+]", "[TB+]", "[AD+]", "[PM+]", "[DL+]", "[ED+]"])
         if info_hash and (info_hash, is_cached) in seen_hashes:
@@ -915,7 +987,7 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
     if not streams:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة حالياً للفلم {canonical_title} ({release_year})."}
 
-    best, top_alternatives = select_best_movie_release(streams)
+    best, top_alternatives = select_best_movie_release(streams, expected_title=canonical_title, expected_year=release_year)
     if not best:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على نسخة مطابقة لمعايير الجودة (بدون أبسكيل)."}
 
@@ -2477,7 +2549,7 @@ def _stream_resolved_media(t0, imdb_id, canonical_title, release_year, streams, 
     4. Orders synced subtitles first and launches the chosen player.
     """
     is_series = (season is not None and episode is not None)
-    best, top_alts = select_best_movie_release(streams)
+    best, top_alts = select_best_movie_release(streams, expected_title=canonical_title, expected_year=release_year, is_series=is_series)
     if not best:
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على رابط بث مباشر مخزن على TorBox."}
 
@@ -2678,7 +2750,7 @@ if __name__ == "__main__":
         yr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "none" else None
         imdb_id, c_title, r_year = resolve_movie_identity(q, year=yr)
         streams = fetch_torrentio_movie_streams(imdb_id) if imdb_id else []
-        best, top_alts = select_best_movie_release(streams) if streams else (None, [])
+        best, top_alts = select_best_movie_release(streams, expected_title=c_title, expected_year=r_year) if streams else (None, [])
         print(json.dumps({
             "movie": {"title": c_title, "year": r_year, "imdb_id": imdb_id},
             "best": best,
