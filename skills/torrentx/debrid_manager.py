@@ -265,10 +265,89 @@ def _get_fixed_drives_free_gb():
     return drives
 
 
-def select_best_drive_dir(media_type="movies", required_gb=0.0):
+RESERVATIONS_FILE = os.path.expanduser(r"~\.gemini\config\torrentx_drive_reservations.json")
+RESERVATIONS_LOCK = os.path.expanduser(r"~\.gemini\config\torrentx_drive_reservations.lock")
+
+
+def _with_reservation_lock(fn):
+    os.makedirs(os.path.dirname(RESERVATIONS_FILE), exist_ok=True)
+    lock_fh = open(RESERVATIONS_LOCK, "a+", encoding="utf-8")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            for _ in range(50):
+                try:
+                    msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        return fn()
+    finally:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                lock_fh.seek(0)
+                msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        lock_fh.close()
+
+
+def _prune_and_load_reservations():
+    now = time.time()
+    items = []
+    if os.path.exists(RESERVATIONS_FILE):
+        try:
+            with open(RESERVATIONS_FILE, "r", encoding="utf-8") as f:
+                items = json.load(f) or []
+        except Exception:
+            items = []
+    active = []
+    for it in items:
+        created = float(it.get("created_at", 0))
+        if now - created > 14400:  # 4h expiry
+            continue
+        tpath = it.get("target_path") or ""
+        if tpath and os.path.exists(tpath) and not os.path.exists(tpath + ".aria2") and (now - created > 30):
+            continue
+        active.append(it)
+    return active
+
+
+def _save_reservations(items):
+    with open(RESERVATIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+
+
+def _reserved_gb_by_drive(active_items):
+    reserved = {}
+    for it in active_items:
+        drv = it.get("drive", "")
+        total_gb = float(it.get("size_gb", 0.0))
+        tpath = it.get("target_path") or ""
+        on_disk_gb = 0.0
+        if tpath and os.path.exists(tpath):
+            try:
+                on_disk_gb = os.path.getsize(tpath) / (1024 ** 3)
+            except Exception:
+                pass
+        remaining = max(0.0, total_gb - on_disk_gb)
+        reserved[drv] = reserved.get(drv, 0.0) + remaining
+    return reserved
+
+
+def select_best_drive_dir(media_type="movies", required_gb=0.0, reserve_key=None):
     """
-    Picks the fixed drive with the most available free space (ensuring room for download + muxing),
-    and returns <BestDrive>\\Movies or <BestDrive>\\Series.
+    Picks the fixed drive with the most effective free space (accounting for concurrent/pending downloads),
+    preferring a drive that fits 2x required_gb (download + mux), then 1x required_gb (cross-drive mux).
+    When reserve_key is provided, atomically reserves required_gb on the chosen drive so parallel
+    downloads spill over to the next drive automatically.
     """
     folder_map = {
         "movie": "Movies",
@@ -279,13 +358,44 @@ def select_best_drive_dir(media_type="movies", required_gb=0.0):
         "anime": "Anime",
     }
     sub = folder_map.get((media_type or "movies").lower(), "Movies")
-    drives = _get_fixed_drives_free_gb()
-    if drives:
-        needed = float(required_gb or 0.0) + 5.0
-        suitable = [d for d in drives if d[1] >= needed]
-        chosen = suitable[0] if suitable else drives[0]
-        return os.path.join(chosen[0], sub)
-    return os.path.expanduser(rf"~\Downloads\{sub}")
+
+    def _pick_and_reserve():
+        drives = _get_fixed_drives_free_gb()
+        if not drives:
+            return os.path.expanduser(rf"~\Downloads\{sub}")
+
+        active = _prune_and_load_reservations()
+        res_map = _reserved_gb_by_drive(active)
+
+        # Compute effective free space per drive
+        eff_drives = []
+        for root, free_gb, total_gb in drives:
+            eff_free = round(max(0.0, free_gb - res_map.get(root, 0.0)), 2)
+            eff_drives.append((root, eff_free, free_gb, total_gb))
+        eff_drives.sort(key=lambda x: x[1], reverse=True)
+
+        req = float(required_gb or 0.0)
+        needed_2x = (2.0 * req) + 2.0 if req > 0 else 5.0
+        needed_1x = req + 2.0 if req > 0 else 5.0
+
+        fit_2x = [d for d in eff_drives if d[1] >= needed_2x]
+        fit_1x = [d for d in eff_drives if d[1] >= needed_1x]
+        chosen = fit_2x[0] if fit_2x else (fit_1x[0] if fit_1x else eff_drives[0])
+
+        out_dir = os.path.join(chosen[0], sub)
+        if req > 0 and reserve_key:
+            full_res_path = reserve_key if os.path.isabs(reserve_key) else os.path.join(out_dir, reserve_key)
+            active = [a for a in active if a.get("target_path") != full_res_path]
+            active.append({
+                "drive": chosen[0],
+                "size_gb": req,
+                "target_path": full_res_path,
+                "created_at": time.time()
+            })
+        _save_reservations(active)
+        return out_dir
+
+    return _with_reservation_lock(_pick_and_reserve)
 
 
 def get_drive_info_for_path(path):
@@ -307,7 +417,7 @@ def get_drive_info_for_path(path):
         return {"drive": drive_root, "free_gb": None, "total_gb": None}
 
 
-def get_media_output_dir(media_type="movie", title=None, year=None, season=None, is_full_series_or_season=False, required_gb=0.0):
+def get_media_output_dir(media_type="movie", title=None, year=None, season=None, is_full_series_or_season=False, required_gb=0.0, reserve_key=None):
     """
     Folder policy:
     - Movies: NO per-movie folder -> <BestDrive>\\Movies
@@ -315,7 +425,7 @@ def get_media_output_dir(media_type="movie", title=None, year=None, season=None,
     - Full Series / Season Pack: Create folder -> <BestDrive>\\Series\\<Title>\\[Season XX]
     """
     mtype = (media_type or "movie").lower()
-    base_dir = select_best_drive_dir(mtype, required_gb=required_gb)
+    base_dir = select_best_drive_dir(mtype, required_gb=required_gb, reserve_key=reserve_key)
     if mtype in ("series", "tv") and is_full_series_or_season and title:
         safe_title = re.sub(r'[\\/*?:"<>|]', '', f"{title} ({year})" if year else title).strip()
         target = os.path.join(base_dir, safe_title)
@@ -776,12 +886,15 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على نسخة مطابقة لمعايير الجودة (بدون أبسكيل)."}
 
     if not output_dir:
-        # Pick the drive with the most free space; do NOT create a per-movie subfolder
+        # Pick the drive with the most effective free space and reserve it for parallel downloads;
+        # do NOT create a per-movie subfolder
+        clean_fn = re.sub(r'[\r\n"&|<>\^%`$;*?\\/:]', '_', os.path.basename(best["title"])).strip()
         output_dir = get_media_output_dir(
             media_type="movie",
             title=canonical_title,
             year=release_year,
-            required_gb=best.get("size_gb", 0.0)
+            required_gb=best.get("size_gb", 0.0),
+            reserve_key=clean_fn
         )
     os.makedirs(output_dir, exist_ok=True)
 

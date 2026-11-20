@@ -1818,32 +1818,90 @@ def mux_subtitle_into_video(video_path, subtitle_items, output_path=None, replac
 
     base_no_ext, v_ext = os.path.splitext(video_path)
     out_ext = ".mkv" if v_ext.lower() != ".mkv" else v_ext
-    temp_output = output_path or (base_no_ext + ".mux_temp" + out_ext)
+    cross_drive_tmp_dir = None
+
+    if output_path:
+        temp_output = output_path
+    else:
+        video_size_bytes = os.path.getsize(video_path)
+        needed_bytes = video_size_bytes + (2 * 1024 ** 3)  # video + 2 GB safety buffer
+        same_drive_free = shutil.disk_usage(os.path.dirname(os.path.abspath(video_path))).free
+        if same_drive_free >= needed_bytes:
+            temp_output = base_no_ext + ".mux_temp" + out_ext
+        else:
+            # Cross-Drive Temp Muxing: look for another fixed drive with enough space
+            alt_root = None
+            if sys.platform == "win32":
+                import ctypes
+                import string
+                kernel32 = ctypes.windll.kernel32
+                src_drive = os.path.splitdrive(os.path.abspath(video_path))[0].upper()
+                best_free = -1
+                for letter in string.ascii_uppercase:
+                    root = f"{letter}:\\"
+                    if root[:2].upper() == src_drive:
+                        continue
+                    if os.path.exists(root) and kernel32.GetDriveTypeW(root) == 3:
+                        try:
+                            u = shutil.disk_usage(root)
+                            if u.total > 0 and u.free >= needed_bytes and u.free > best_free:
+                                best_free = u.free
+                                alt_root = root
+                        except Exception:
+                            pass
+            if alt_root:
+                cross_drive_tmp_dir = os.path.join(alt_root, ".torrentx_mux_tmp")
+                os.makedirs(cross_drive_tmp_dir, exist_ok=True)
+                temp_output = os.path.join(cross_drive_tmp_dir, os.path.basename(base_no_ext) + ".mux_temp" + out_ext)
+            else:
+                return {
+                    "error": True,
+                    "insufficient_space": True,
+                    "fallback_mode": "companion_srt",
+                    "message": "لا توجد مساحة كافية على أي قرص لإنشاء نسخة دمج مؤقتة؛ تم تفعيل خطة الطوارئ لحفظ الترجمة بجانب الفلم."
+                }
 
     def _finalize_mux(tool_name):
         final_target = video_path
         if replace_original and not output_path:
             if v_ext.lower() != ".mkv":
                 final_target = base_no_ext + ".mkv"
-                shutil.move(temp_output, final_target)
-                try:
+                if cross_drive_tmp_dir:
                     os.remove(video_path)
-                except Exception:
-                    pass
+                    shutil.move(temp_output, final_target)
+                else:
+                    shutil.move(temp_output, final_target)
+                    try:
+                        os.remove(video_path)
+                    except Exception:
+                        pass
             else:
-                bak = video_path + ".orig_bak"
-                shutil.move(video_path, bak)
-                shutil.move(temp_output, video_path)
-                if os.path.exists(bak):
-                    os.remove(bak)
+                if cross_drive_tmp_dir:
+                    # Free space on original drive first (temp_output is already verified on other drive)
+                    os.remove(video_path)
+                    shutil.move(temp_output, video_path)
+                else:
+                    bak = video_path + ".orig_bak"
+                    shutil.move(video_path, bak)
+                    shutil.move(temp_output, video_path)
+                    if os.path.exists(bak):
+                        os.remove(bak)
         else:
             final_target = temp_output
+
+        if cross_drive_tmp_dir and os.path.isdir(cross_drive_tmp_dir):
+            try:
+                if not os.listdir(cross_drive_tmp_dir):
+                    os.rmdir(cross_drive_tmp_dir)
+            except Exception:
+                pass
 
         emb_verify = check_embedded_arabic_sub(final_target, timeout=15)
         return {
             "success": True,
             "output_file": final_target,
             "tool": tool_name,
+            "cross_drive_mux": bool(cross_drive_tmp_dir),
             "tracks_muxed": len(normalized_subs),
             "verified_embedded_arabic": emb_verify.get("has_embedded_arabic", False),
             "verified_arabic_tracks": emb_verify.get("arabic_tracks", [])
@@ -1997,9 +2055,21 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
 
     mux_res = None
     cleaned_external_subs = False
+    fallback_companion_sub = None
     if mux_into_mkv and synced_results:
         mux_res = mux_subtitle_into_video(video_path, synced_results, replace_original=True)
-        if mux_res and mux_res.get("success"):
+        if mux_res and mux_res.get("fallback_mode") == "companion_srt":
+            # Emergency fallback: save synced .ar.srt right next to the video (<200 KB)
+            v_dir = os.path.dirname(os.path.abspath(video_path))
+            v_stem = os.path.splitext(os.path.basename(video_path))[0]
+            best_synced = synced_results[0]["file_path"]
+            companion_target = os.path.join(v_dir, f"{v_stem}.ar.srt")
+            try:
+                shutil.copy2(best_synced, companion_target)
+                fallback_companion_sub = companion_target
+            except Exception:
+                pass
+        if (mux_res and mux_res.get("success")) or fallback_companion_sub:
             v_stem = os.path.splitext(os.path.basename(video_path))[0]
             sub_dirs_to_check = set()
             for r in synced_results:
@@ -2016,6 +2086,8 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
                     continue
                 for extra_name in [f"{v_stem}.srt", f"{v_stem}.ar.srt", f".{os.path.basename(video_path)}.manifest.json"]:
                     ep = os.path.join(sd, extra_name)
+                    if fallback_companion_sub and os.path.abspath(ep) == os.path.abspath(fallback_companion_sub):
+                        continue
                     try:
                         if os.path.exists(ep):
                             os.remove(ep)
@@ -2035,6 +2107,7 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
         "video_path": (mux_res or {}).get("output_file") or video_path,
         "all_verified_synced": all_verified,
         "cleaned_external_subs": cleaned_external_subs,
+        "fallback_companion_sub": fallback_companion_sub,
         "synced_subtitles": synced_results,
         "mux_result": mux_res
     }
@@ -2089,7 +2162,7 @@ def watch_and_sync_video(target_video_path, manifest_or_sub_paths, timeout_minut
                         sub_items = manifest_or_sub_paths
 
                     res = sync_all_and_mux(target_video_path, sub_items, mux_into_mkv=True)
-                    if (res.get("mux_result") or {}).get("success"):
+                    if (res.get("mux_result") or {}).get("success") or res.get("fallback_companion_sub"):
                         try:
                             if os.path.exists(log_path):
                                 os.remove(log_path)
