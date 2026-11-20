@@ -1185,8 +1185,8 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
         mpc_bin = r"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe"
         if os.path.exists(mpc_bin):
             cmd = [mpc_bin, video_path_or_url]
-            for sp in sub_list:
-                cmd.extend(["/sub", sp])
+            if primary_sub:
+                cmd.extend(["/sub", primary_sub])
             return _launch_player(cmd, "MPC-HC")
 
     elif player == "potplayer":
@@ -1207,6 +1207,8 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
             mpv_bin = HARBOR_MPV_PATH if os.path.exists(HARBOR_MPV_PATH) else (shutil.which("mpv") or mpvnet_bin)
             pname = "MPV"
             cmd = [mpv_bin, video_path_or_url, "--force-window=yes"]
+        if video_path_or_url.startswith("http"):
+            cmd.extend(["--cache=yes", "--demuxer-max-bytes=250MiB", "--demuxer-readahead-secs=30"])
         for sp in sub_list:
             cmd.append(f"--sub-file={sp}")
         return _launch_player(cmd, pname)
