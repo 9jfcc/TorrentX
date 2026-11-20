@@ -13,12 +13,35 @@ except Exception:
 
 CONFIG_PATH = os.path.expanduser(r"~\.gemini\config\media_organizer.json")
 
+def _best_drive_subdir(subdir_name):
+    if sys.platform == "win32":
+        import ctypes
+        import string
+        best_root = None
+        best_free = -1
+        kernel32 = ctypes.windll.kernel32
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.exists(root) and kernel32.GetDriveTypeW(root) == 3:
+                try:
+                    u = shutil.disk_usage(root)
+                    if u.total > 0 and u.free > best_free:
+                        best_free = u.free
+                        best_root = root
+                except Exception:
+                    pass
+        if best_root:
+            return os.path.join(best_root, subdir_name)
+    return os.path.expanduser(rf"~\Downloads\{subdir_name}")
+
+
 def load_config():
     default_cfg = {
-        "movies_dir": r"D:\Movies" if os.path.exists(r"D:\ ") else os.path.expanduser(r"~\Downloads\Movies"),
-        "series_dir": r"D:\Series" if os.path.exists(r"D:\ ") else os.path.expanduser(r"~\Downloads\Series"),
+        "movies_dir": _best_drive_subdir("Movies"),
+        "series_dir": _best_drive_subdir("Series"),
         "naming_style": "clean",  # Options: "clean" (احترافي مختصر), "standard" (قياسي), "detailed" (كامل مع الجودة)
-        "create_movie_folder": True,
+        "create_movie_folder": False,
+        "create_episode_folder": False,
         "create_season_folder": True
     }
     if os.path.exists(CONFIG_PATH):
@@ -142,7 +165,7 @@ def parse_media_filename(file_path):
         "extension": ext
     }
 
-def organize_and_rename_file(video_path, custom_dest_dir=None, naming_style=None, companion_sub_path=None, move=True):
+def organize_and_rename_file(video_path, custom_dest_dir=None, naming_style=None, companion_sub_path=None, move=True, is_full_series_or_season=True):
     """
     Renames and moves/copies a downloaded video and its companion subtitle
     into the standard Plex / Jellyfin / Infuse / Emby library structure.
@@ -186,8 +209,11 @@ def organize_and_rename_file(video_path, custom_dest_dir=None, naming_style=None
             else:
                 target_filename = f"{show_title} - S{s_num:02d}E{e_num:02d}{q_part}{ext}"
 
-        # Standard Plex Folder Hierarchy: Series\Show Name\Season 01\
-        target_dir = os.path.join(base_series_dir, show_title, f"Season {s_num:02d}")
+        # Folder policy: create folder ONLY for full series / season packs, NOT for single episodes
+        if is_full_series_or_season and cfg.get("create_season_folder", True):
+            target_dir = os.path.join(base_series_dir, show_title, f"Season {s_num:02d}")
+        else:
+            target_dir = base_series_dir
         
     # ----------------------------------------------------
     # Case B: Movie Organization
@@ -206,8 +232,11 @@ def organize_and_rename_file(video_path, custom_dest_dir=None, naming_style=None
             q_part = f" [{quality}]" if quality else ""
             target_filename = f"{movie_title}{year_str}{q_part}{ext}"
 
-        # Standard Plex Movie Hierarchy: Movies\Movie Name (Year)\
-        target_dir = os.path.join(base_movies_dir, f"{movie_title}{year_str}")
+        # Folder policy: NO per-movie folder by default
+        if cfg.get("create_movie_folder", False):
+            target_dir = os.path.join(base_movies_dir, f"{movie_title}{year_str}")
+        else:
+            target_dir = base_movies_dir
 
     os.makedirs(target_dir, exist_ok=True)
     final_video_path = os.path.join(target_dir, target_filename)

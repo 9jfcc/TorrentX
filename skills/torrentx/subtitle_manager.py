@@ -1343,23 +1343,34 @@ def sync_subtitle_with_alass(video_path, subtitle_path, output_path=None, ref_su
             sync_source = ref_sub_path if (ref_sub_path and os.path.exists(ref_sub_path)) else video_path
             cmd = [alass_bin, sync_source, subtitle_path, output_path]
             subprocess.run(cmd, capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
-            if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
-                try:
-                    os.remove(ref_sub_path)
-                except Exception:
-                    pass
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 convert_to_utf8_bom(output_path, apply_rtl_fix=True)
                 orig_first, _, _ = parse_sub_timestamps(subtitle_path)
                 synced_first, _, _ = parse_sub_timestamps(output_path)
                 shift = round((synced_first or 0) - (orig_first or 0), 2) if (orig_first is not None and synced_first is not None) else 0.0
+                post_matched, post_offset, post_drift = (True, 0.0, 0.0)
+                if ref_sub_path and os.path.exists(ref_sub_path):
+                    post_matched, post_offset, post_drift = check_timing_against_reference(output_path, ref_sub_path)
+                if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
+                    try:
+                        os.remove(ref_sub_path)
+                    except Exception:
+                        pass
                 return {
                     "success": True,
                     "output_file": output_path,
                     "tool": "alass",
                     "shift_seconds": shift,
-                    "ref_type": "embedded_sub" if ref_sub_path else "audio"
+                    "ref_type": "embedded_sub" if ref_sub_path else "audio",
+                    "verified_matched": post_matched,
+                    "post_offset_seconds": post_offset,
+                    "post_drift_seconds": post_drift
                 }
+            if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
+                try:
+                    os.remove(ref_sub_path)
+                except Exception:
+                    pass
         except Exception:
             if cleanup_ref and ref_sub_path and os.path.exists(ref_sub_path):
                 try:
@@ -1650,7 +1661,38 @@ def mux_subtitle_into_video(video_path, subtitle_items, output_path=None, replac
     if not os.path.exists(video_path) or not normalized_subs:
         return {"error": True, "message": "Video or subtitle files do not exist"}
 
-    temp_output = output_path or (os.path.splitext(video_path)[0] + ".mux_temp.mkv")
+    base_no_ext, v_ext = os.path.splitext(video_path)
+    out_ext = ".mkv" if v_ext.lower() != ".mkv" else v_ext
+    temp_output = output_path or (base_no_ext + ".mux_temp" + out_ext)
+
+    def _finalize_mux(tool_name):
+        final_target = video_path
+        if replace_original and not output_path:
+            if v_ext.lower() != ".mkv":
+                final_target = base_no_ext + ".mkv"
+                shutil.move(temp_output, final_target)
+                try:
+                    os.remove(video_path)
+                except Exception:
+                    pass
+            else:
+                bak = video_path + ".orig_bak"
+                shutil.move(video_path, bak)
+                shutil.move(temp_output, video_path)
+                if os.path.exists(bak):
+                    os.remove(bak)
+        else:
+            final_target = temp_output
+
+        emb_verify = check_embedded_arabic_sub(final_target, timeout=15)
+        return {
+            "success": True,
+            "output_file": final_target,
+            "tool": tool_name,
+            "tracks_muxed": len(normalized_subs),
+            "verified_embedded_arabic": emb_verify.get("has_embedded_arabic", False),
+            "verified_arabic_tracks": emb_verify.get("arabic_tracks", [])
+        }
 
     mkvmerge_bin = shutil.which("mkvmerge") or (r"C:\Program Files\MKVToolNix\mkvmerge.exe" if os.path.exists(r"C:\Program Files\MKVToolNix\mkvmerge.exe") else None)
     if mkvmerge_bin:
@@ -1659,16 +1701,9 @@ def mux_subtitle_into_video(video_path, subtitle_items, output_path=None, replac
             default_flag = "yes" if idx == 0 else "no"
             cmd.extend(["--language", "0:ara", "--track-name", f"0:{lbl}", "--default-track-flag", f"0:{default_flag}", sp])
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace")
-            if res.returncode in [0, 1] and os.path.exists(temp_output):
-                if replace_original and not output_path:
-                    bak = video_path + ".orig_bak"
-                    shutil.move(video_path, bak)
-                    shutil.move(temp_output, video_path)
-                    if os.path.exists(bak):
-                        os.remove(bak)
-                    return {"success": True, "output_file": video_path, "tool": "mkvmerge", "tracks_muxed": len(normalized_subs)}
-                return {"success": True, "output_file": temp_output, "tool": "mkvmerge", "tracks_muxed": len(normalized_subs)}
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, encoding="utf-8", errors="replace")
+            if res.returncode in [0, 1] and os.path.exists(temp_output) and os.path.getsize(temp_output) > 0:
+                return _finalize_mux("mkvmerge")
         except Exception:
             if os.path.exists(temp_output):
                 try:
@@ -1676,7 +1711,51 @@ def mux_subtitle_into_video(video_path, subtitle_items, output_path=None, replac
                 except Exception:
                     pass
 
-    return {"error": True, "message": "MKVMerge muxing failed"}
+    # Fallback: ffmpeg lossless remux into MKV
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+    existing_sub_count = 0
+    try:
+        pr = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "s", "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=20, encoding="utf-8", errors="replace"
+        )
+        existing_sub_count = len([ln for ln in pr.stdout.splitlines() if ln.strip()])
+    except Exception:
+        existing_sub_count = 0
+
+    ff_cmd = [ffmpeg_bin, "-y", "-i", video_path]
+    for sp, _ in normalized_subs:
+        ff_cmd.extend(["-i", sp])
+    ff_cmd.extend(["-map", "0"])
+    for idx in range(len(normalized_subs)):
+        ff_cmd.extend(["-map", f"{idx + 1}:0"])
+    ff_cmd.extend(["-c", "copy"])
+    for idx, (_, lbl) in enumerate(normalized_subs):
+        s_idx = existing_sub_count + idx
+        ff_cmd.extend([
+            f"-metadata:s:s:{s_idx}", "language=ara",
+            f"-metadata:s:s:{s_idx}", f"title={lbl}",
+            f"-disposition:s:{s_idx}", "default" if idx == 0 else "0"
+        ])
+    ff_cmd.append(temp_output)
+    try:
+        res = subprocess.run(ff_cmd, capture_output=True, text=True, timeout=900, encoding="utf-8", errors="replace")
+        if res.returncode == 0 and os.path.exists(temp_output) and os.path.getsize(temp_output) > 0.9 * os.path.getsize(video_path):
+            return _finalize_mux("ffmpeg")
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except Exception:
+                pass
+        return {"error": True, "message": f"ffmpeg muxing failed (code {res.returncode}): {(res.stderr or '')[-400:]}"}
+    except Exception as e:
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except Exception:
+                pass
+        return {"error": True, "message": f"MKVMerge & ffmpeg muxing failed: {e}"}
 
 
 # ==========================================
@@ -1727,14 +1806,20 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
                 "file_path": sub_path,
                 "track_label": label_synced,
                 "sync_tool": tool_u,
-                "shift_seconds": shift_s
+                "shift_seconds": shift_s,
+                "verified_matched": sync_res.get("verified_matched", tool_u == "already_matched"),
+                "post_offset_seconds": sync_res.get("post_offset_seconds", sync_res.get("shift_seconds", 0.0)),
+                "post_drift_seconds": sync_res.get("post_drift_seconds", sync_res.get("drift_seconds", 0.0))
             })
         else:
             synced_results.append({
                 "file_path": sub_path,
                 "track_label": label,
                 "sync_tool": "unchanged",
-                "shift_seconds": 0.0
+                "shift_seconds": 0.0,
+                "verified_matched": False,
+                "post_offset_seconds": None,
+                "post_drift_seconds": None
             })
 
     if ref_sub and os.path.exists(ref_sub):
@@ -1756,32 +1841,85 @@ def sync_all_and_mux(video_path, subtitle_items, mux_into_mkv=True):
                     pass
 
     mux_res = None
+    cleaned_external_subs = False
     if mux_into_mkv and synced_results:
         mux_res = mux_subtitle_into_video(video_path, synced_results, replace_original=True)
+        if mux_res and mux_res.get("success"):
+            v_stem = os.path.splitext(os.path.basename(video_path))[0]
+            sub_dirs_to_check = set()
+            for r in synced_results:
+                sp = r.get("file_path")
+                if sp:
+                    sub_dirs_to_check.add(os.path.dirname(sp))
+                    try:
+                        if os.path.exists(sp):
+                            os.remove(sp)
+                    except Exception:
+                        pass
+            for sd in sub_dirs_to_check:
+                if not sd:
+                    continue
+                for extra_name in [f"{v_stem}.srt", f"{v_stem}.ar.srt", f".{os.path.basename(video_path)}.manifest.json"]:
+                    ep = os.path.join(sd, extra_name)
+                    try:
+                        if os.path.exists(ep):
+                            os.remove(ep)
+                    except Exception:
+                        pass
+                if os.path.basename(sd).lower() == "subtitles" and os.path.isdir(sd):
+                    try:
+                        if not os.listdir(sd):
+                            os.rmdir(sd)
+                    except Exception:
+                        pass
+            cleaned_external_subs = True
 
+    all_verified = bool(synced_results) and all(r.get("verified_matched", False) for r in synced_results)
     return {
         "success": True,
-        "video_path": video_path,
+        "video_path": (mux_res or {}).get("output_file") or video_path,
+        "all_verified_synced": all_verified,
+        "cleaned_external_subs": cleaned_external_subs,
         "synced_subtitles": synced_results,
         "mux_result": mux_res
     }
 
 
-def watch_and_sync_video(target_video_path, manifest_or_sub_paths, timeout_minutes=120):
+def watch_and_sync_video(target_video_path, manifest_or_sub_paths, timeout_minutes=180):
     """
-    Waits in the background for Aria2 to finish downloading target_video_path (no .aria2 file),
-    then automatically runs alass timing synchronization on all downloaded subtitles and muxes them!
+    Waits in the background for Aria2 to finish downloading target_video_path (no .aria2 file + stable size),
+    then automatically runs alass timing synchronization on all downloaded subtitles, verifies sync, and muxes them!
     """
     max_checks = (timeout_minutes * 60) // 6
     aria2_ctl = f"{target_video_path}.aria2"
+    log_path = os.path.join(os.path.dirname(target_video_path) or ".", f".{os.path.basename(target_video_path)}.sync.log")
+
+    def _log(msg):
+        try:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
+
+    _log(f"Watcher started for: {target_video_path}")
+    prev_size = -1
+    stable_hits = 0
 
     for _ in range(max_checks):
         time.sleep(6)
         if os.path.exists(target_video_path) and not os.path.exists(aria2_ctl):
             try:
-                if os.path.getsize(target_video_path) > 30 * 1024 * 1024:
-                    # Wait 2 seconds to ensure file handle is released by Aria2
-                    time.sleep(2)
+                cur_size = os.path.getsize(target_video_path)
+                if cur_size > 30 * 1024 * 1024:
+                    if cur_size == prev_size:
+                        stable_hits += 1
+                    else:
+                        stable_hits = 0
+                    prev_size = cur_size
+                    if stable_hits < 1:
+                        continue
+
+                    _log(f"Download complete ({cur_size} bytes). Starting sync_all_and_mux...")
                     sub_items = []
                     if isinstance(manifest_or_sub_paths, str) and manifest_or_sub_paths.endswith(".json") and os.path.exists(manifest_or_sub_paths):
                         with open(manifest_or_sub_paths, "r", encoding="utf-8") as mf:
@@ -1795,9 +1933,20 @@ def watch_and_sync_video(target_video_path, manifest_or_sub_paths, timeout_minut
                     else:
                         sub_items = manifest_or_sub_paths
 
-                    return sync_all_and_mux(target_video_path, sub_items, mux_into_mkv=True)
-            except OSError:
+                    res = sync_all_and_mux(target_video_path, sub_items, mux_into_mkv=True)
+                    if (res.get("mux_result") or {}).get("success"):
+                        try:
+                            if os.path.exists(log_path):
+                                os.remove(log_path)
+                        except Exception:
+                            pass
+                    else:
+                        _log(f"sync_all_and_mux finished: {json.dumps(res, ensure_ascii=False)}")
+                    return res
+            except OSError as e:
+                _log(f"OSError while checking file: {e}")
                 continue
+    _log("Timeout waiting for video download completion")
     return {"error": True, "message": "Timeout waiting for video download completion"}
 
 

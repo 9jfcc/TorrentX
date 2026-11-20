@@ -238,6 +238,116 @@ def unwrap_debrid_redirect(download_url, timeout=10):
     return download_url
 
 
+def _get_fixed_drives_free_gb():
+    """Returns list of (root_path, free_gb, total_gb) for all fixed local drives sorted by free_gb desc."""
+    drives = []
+    if sys.platform == "win32":
+        import ctypes
+        import string
+        kernel32 = ctypes.windll.kernel32
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.exists(root) and kernel32.GetDriveTypeW(root) == 3:  # DRIVE_FIXED
+                try:
+                    usage = shutil.disk_usage(root)
+                    if usage.total > 0:
+                        drives.append((root, round(usage.free / (1024 ** 3), 2), round(usage.total / (1024 ** 3), 2)))
+                except Exception:
+                    pass
+    else:
+        try:
+            home = os.path.expanduser("~")
+            usage = shutil.disk_usage(home)
+            drives.append((home, round(usage.free / (1024 ** 3), 2), round(usage.total / (1024 ** 3), 2)))
+        except Exception:
+            pass
+    drives.sort(key=lambda x: x[1], reverse=True)
+    return drives
+
+
+def select_best_drive_dir(media_type="movies", required_gb=0.0):
+    """
+    Picks the fixed drive with the most available free space (ensuring room for download + muxing),
+    and returns <BestDrive>\\Movies or <BestDrive>\\Series.
+    """
+    folder_map = {
+        "movie": "Movies",
+        "movies": "Movies",
+        "series": "Series",
+        "tv": "Series",
+        "episode": "Series",
+        "anime": "Anime",
+    }
+    sub = folder_map.get((media_type or "movies").lower(), "Movies")
+    drives = _get_fixed_drives_free_gb()
+    if drives:
+        needed = float(required_gb or 0.0) + 5.0
+        suitable = [d for d in drives if d[1] >= needed]
+        chosen = suitable[0] if suitable else drives[0]
+        return os.path.join(chosen[0], sub)
+    return os.path.expanduser(rf"~\Downloads\{sub}")
+
+
+def get_drive_info_for_path(path):
+    """Returns drive letter/root and free/total GB for a given output path."""
+    abs_p = os.path.abspath(path)
+    drive_root = os.path.splitdrive(abs_p)[0]
+    if drive_root and not drive_root.endswith("\\"):
+        drive_root += "\\"
+    if not drive_root:
+        drive_root = "/"
+    try:
+        u = shutil.disk_usage(drive_root if os.path.exists(drive_root) else abs_p)
+        return {
+            "drive": drive_root,
+            "free_gb": round(u.free / (1024 ** 3), 2),
+            "total_gb": round(u.total / (1024 ** 3), 2)
+        }
+    except Exception:
+        return {"drive": drive_root, "free_gb": None, "total_gb": None}
+
+
+def get_media_output_dir(media_type="movie", title=None, year=None, season=None, is_full_series_or_season=False, required_gb=0.0):
+    """
+    Folder policy:
+    - Movies: NO per-movie folder -> <BestDrive>\\Movies
+    - Single Episode: NO folder -> <BestDrive>\\Series
+    - Full Series / Season Pack: Create folder -> <BestDrive>\\Series\\<Title>\\[Season XX]
+    """
+    mtype = (media_type or "movie").lower()
+    base_dir = select_best_drive_dir(mtype, required_gb=required_gb)
+    if mtype in ("series", "tv") and is_full_series_or_season and title:
+        safe_title = re.sub(r'[\\/*?:"<>|]', '', f"{title} ({year})" if year else title).strip()
+        target = os.path.join(base_dir, safe_title)
+        if season is not None:
+            target = os.path.join(target, f"Season {int(season):02d}")
+        return target
+    return base_dir
+
+
+def _launch_detached_win32(cmd):
+    """Launches a process detached from Windows Job Objects via Win32_Process Create."""
+    if sys.platform != "win32":
+        return False
+    try:
+        escaped_args = []
+        for arg in cmd:
+            if any(c in arg for c in ' \t"'):
+                escaped_args.append('"' + arg.replace('"', '\\"') + '"')
+            else:
+                escaped_args.append(arg)
+        raw_cli = ' '.join(escaped_args)
+        b64_cli = __import__('base64').b64encode(raw_cli.encode('utf-8')).decode('ascii')
+        ps_cmd = [
+            "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+            f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64_cli}'))}}"
+        ]
+        res = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=5)
+        return ("ProcessId" in res.stdout or "ReturnValue" in res.stdout)
+    except Exception:
+        return False
+
+
 def send_to_downloader(download_url, downloader=None, output_dir=None, file_name=None):
     cfg = load_config()
     if not downloader:
@@ -248,7 +358,7 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
 
     downloader = (downloader or "aria2").lower()
     if not output_dir:
-        output_dir = os.path.expanduser(r"~\Downloads\Movies")
+        output_dir = select_best_drive_dir("movies")
     os.makedirs(output_dir, exist_ok=True)
 
     download_url = unwrap_debrid_redirect(download_url)
@@ -301,26 +411,7 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
         if download_url.startswith("magnet:"):
             cmd.append("--seed-time=0")
 
-        launched = False
-        if sys.platform == "win32":
-            try:
-                escaped_args = []
-                for arg in cmd:
-                    if any(c in arg for c in ' \t"'):
-                        escaped_args.append('"' + arg.replace('"', '\\"') + '"')
-                    else:
-                        escaped_args.append(arg)
-                raw_cli = ' '.join(escaped_args)
-                b64_cli = __import__('base64').b64encode(raw_cli.encode('utf-8')).decode('ascii')
-                ps_cmd = [
-                    "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-                    f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{b64_cli}'))}}"
-                ]
-                res = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=5)
-                if "ProcessId" in res.stdout or "ReturnValue" in res.stdout:
-                    launched = True
-            except Exception:
-                pass
+        launched = _launch_detached_win32(cmd)
 
         if not launched:
             if sys.platform == "win32":
@@ -328,15 +419,19 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
             else:
                 subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        drive_info = get_drive_info_for_path(output_dir)
         return {
             "success": True,
             "downloader": "Aria2",
             "connections": 16,
+            "selected_drive": drive_info["drive"],
+            "drive_free_gb": drive_info["free_gb"],
             "output_dir": output_dir,
             "file_name": clean_filename,
             "target_path": os.path.join(output_dir, clean_filename) if clean_filename else None,
             "direct_url": download_url,
-            "message": "بدأ التحميل السحابي الفوري عبر Aria2 (16 اتصال)"
+            "location_message": f"تم اختيار القرص {drive_info['drive']} (مساحة حرة {drive_info['free_gb']} GB) — مسار الحفظ: {output_dir}",
+            "message": f"بدأ التحميل السحابي الفوري عبر Aria2 في {output_dir}"
         }
     except Exception as e:
         return {"success": False, "error": f"Failed to launch Aria2: {e}"}
@@ -681,9 +776,13 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
         return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على نسخة مطابقة لمعايير الجودة (بدون أبسكيل)."}
 
     if not output_dir:
-        safe_folder = re.sub(r'[\\/*?:"<>|]', '', f"{canonical_title} ({release_year})" if release_year else canonical_title).strip()
-        base_movies = os.path.expanduser(r"~\Downloads\Movies")
-        output_dir = os.path.join(base_movies, safe_folder)
+        # Pick the drive with the most free space; do NOT create a per-movie subfolder
+        output_dir = get_media_output_dir(
+            media_type="movie",
+            title=canonical_title,
+            year=release_year,
+            required_gb=best.get("size_gb", 0.0)
+        )
     os.makedirs(output_dir, exist_ok=True)
 
     # =========================================================================
@@ -736,22 +835,17 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
                 with open(manifest_path, "w", encoding="utf-8") as mf:
                     json.dump(downloaded_subs, mf, ensure_ascii=False, indent=2)
                 sub_mgr_py = os.path.join(SKILL_DIR, "subtitle_manager.py")
+                watch_cmd = [sys.executable, sub_mgr_py, "watch-and-sync", target_video_path, manifest_path]
                 if sys.platform == "win32":
-                    CREATE_NO_WINDOW = 0x08000000
-                    DETACHED_PROCESS = 0x00000008
-                    subprocess.Popen(
-                        [sys.executable, sub_mgr_py, "watch-and-sync", target_video_path, manifest_path],
-                        creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
-                        close_fds=True
-                    )
+                    watcher_launched = _launch_detached_win32(watch_cmd)
+                    if not watcher_launched:
+                        CREATE_NO_WINDOW = 0x08000000
+                        DETACHED_PROCESS = 0x00000008
+                        subprocess.Popen(watch_cmd, creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS, close_fds=True)
+                        watcher_launched = True
                 else:
-                    subprocess.Popen(
-                        [sys.executable, sub_mgr_py, "watch-and-sync", target_video_path, manifest_path],
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                watcher_launched = True
+                    subprocess.Popen(watch_cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    watcher_launched = True
             except Exception:
                 pass
 
@@ -770,6 +864,7 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
         }
 
     total_elapsed = round(time.time() - t0, 2)
+    drive_info = get_drive_info_for_path(output_dir)
     return {
         "success": True,
         "movie": {
@@ -793,8 +888,11 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
             "movie_download_started_in_seconds": movie_started_in_sec,
             "total_pipeline_seconds": total_elapsed,
             "downloader": dl_res.get("downloader"),
+            "selected_drive": drive_info["drive"],
+            "drive_free_gb": drive_info["free_gb"],
             "output_dir": output_dir,
-            "target_video_path": target_video_path
+            "target_video_path": target_video_path,
+            "location_message": f"تم اختيار القرص {drive_info['drive']} (مساحة حرة {drive_info['free_gb']} GB) — مسار الحفظ: {output_dir}"
         },
         "subtitles": subtitle_report,
         "alternatives": [

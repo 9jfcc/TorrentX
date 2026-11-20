@@ -33,10 +33,16 @@ What `fast-movie` does automatically in **~2–4 seconds**:
    - **Priority 2 (Translators / Teams):** Downloads top distinct individual translator or translation team subtitles.
    - **Zero-Duplicate Content Fingerprinting:** Compares the actual normalized Arabic dialogue lines of every downloaded `.srt` file so the same translation is **never** saved twice (even if uploaded under different names across SubSource and SubDL).
    - **Zero OpenSubtitles Tolerance:** Rejects any OpenSubtitles/machine-translated entries and strips any promotional watermarks.
-   - **Dedicated Subtitles Folder:** All external `.srt` subtitles are saved cleanly inside **`~/Downloads/Movies/Subtitles`** (or your configured `subtitles_dir`).
-5. **Automatic `alass` Timing Sync & MKVMerge Muxing:**
-   - Spawns `subtitle_manager.py watch-and-sync` in the background.
-   - As soon as the movie finishes downloading, it extracts the ground-truth embedded reference subtitle (`.ref_eng.srt` from text tracks OR converts Blu-ray PGS `.sup` timestamps to `.ref_eng.srt` in 0.05s!), checks the timing of every downloaded Arabic subtitle, runs **`alass`** to fix any timing offset/drift, applies UTF-8 BOM + Arabic RTL punctuation fixes (`fix_arabic_rtl_file`), and muxes all tracks into the MKV container via `mkvmerge`.
+   - **Dedicated Subtitles Folder:** All external `.srt` subtitles are saved cleanly inside `<BestDrive>\Movies\Subtitles` (or your configured `subtitles_dir`).
+5. **Best Drive Selection & Folder Policy (اختيار أفضل قرص + سياسة المجلدات):**
+   - Automatically scans all fixed drives and picks the drive with the **most free space** (e.g., `D:\Movies` or `D:\Series` instead of filling `C:\`).
+   - **Always report to the user** which drive was chosen (with its free space) and the exact output folder/file path (`selected_drive`, `drive_free_gb`, `output_dir`, `target_video_path`).
+   - **Movies:** Saved directly in `<BestDrive>\Movies\` (**no** per-movie subfolder).
+   - **Single Episode:** Saved directly in `<BestDrive>\Series\` (**no** subfolder).
+   - **Full Series / Season Pack:** Saved inside `<BestDrive>\Series\<Title>\Season XX\` (**creates** a dedicated folder).
+6. **Automatic `alass` Timing Sync, Verification & MKV Muxing:**
+   - Spawns `subtitle_manager.py watch-and-sync` detached via `Win32_Process` so it survives session exit.
+   - As soon as the movie finishes downloading, it extracts the ground-truth embedded reference subtitle (`.ref_eng.srt` from text tracks OR Blu-ray PGS `.sup`), runs **`alass`** to fix any timing offset/drift, **verifies** post-sync alignment (`verified_matched`), applies UTF-8 BOM + Arabic RTL punctuation fixes (`fix_arabic_rtl_file`), and losslessly muxes all tracks into the MKV container via `mkvmerge` or **`ffmpeg` fallback**, verifying the embedded Arabic tracks with `ffprobe`.
 
 ---
 
