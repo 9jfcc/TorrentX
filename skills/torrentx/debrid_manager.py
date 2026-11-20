@@ -1187,12 +1187,19 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
                 cmd.append(f"/sub={subtitle_path}")
             return _launch_player(cmd, "PotPlayer")
 
-    elif player in ["mpv", "harbor"]:
-        mpv_bin = HARBOR_MPV_PATH if os.path.exists(HARBOR_MPV_PATH) else "mpv"
-        cmd = [mpv_bin, video_path_or_url, "--force-window=yes"]
+    elif player in ["mpv", "mpvnet", "harbor"]:
+        mpvnet_bin = shutil.which("mpvnet") or os.path.expanduser(r"~\Desktop\mpv_anime\mpvnet.exe")
+        if player == "mpvnet" or (not os.path.exists(HARBOR_MPV_PATH) and not shutil.which("mpv") and os.path.exists(mpvnet_bin)):
+            mpv_bin = mpvnet_bin
+            pname = "mpv.net"
+            cmd = [mpv_bin, video_path_or_url]
+        else:
+            mpv_bin = HARBOR_MPV_PATH if os.path.exists(HARBOR_MPV_PATH) else (shutil.which("mpv") or mpvnet_bin)
+            pname = "MPV"
+            cmd = [mpv_bin, video_path_or_url, "--force-window=yes"]
         if subtitle_path and os.path.exists(subtitle_path):
             cmd.append(f"--sub-file={subtitle_path}")
-        return _launch_player(cmd, "MPV")
+        return _launch_player(cmd, pname)
 
     elif player == "vlc":
         vlc_bin = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
