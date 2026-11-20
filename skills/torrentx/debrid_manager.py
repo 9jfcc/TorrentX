@@ -530,7 +530,7 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
         if download_url.startswith("magnet:"):
             cmd.append("--seed-time=0")
 
-        launched = _launch_detached_win32(cmd)
+        launched = _launch_detached_win32(cmd, hidden=False)
 
         if not launched:
             if sys.platform == "win32":
@@ -920,16 +920,56 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
     target_video_path = dl_res.get("target_path") or os.path.join(output_dir, best["title"])
 
     # =========================================================================
-    # STEP 2: INSPECT FOR EMBEDDED ARABIC SUBTITLES & FETCH EXTERNAL IF NEEDED
+    # STEP 2: INSPECT EMBEDDED ARABIC & FETCH EXTERNAL SUBTITLES IN PARALLEL
     # =========================================================================
     import subtitle_manager
 
-    embedded_check = {"has_embedded_arabic": False, "arabic_tracks": []}
-    if direct_cdn_url and direct_cdn_url.startswith("http"):
-        embedded_check = subtitle_manager.check_embedded_arabic_sub(direct_cdn_url, timeout=10)
+    sub_output_dir = os.path.join(output_dir, "Subtitles")
+    os.makedirs(sub_output_dir, exist_ok=True)
+    v_stem = os.path.splitext(os.path.basename(target_video_path))[0]
+
+    def _run_embedded_check():
+        if direct_cdn_url and direct_cdn_url.startswith("http"):
+            return subtitle_manager.check_embedded_arabic_sub(direct_cdn_url, timeout=10)
+        return {"has_embedded_arabic": False, "arabic_tracks": []}
+
+    def _run_sub_fetch():
+        return subtitle_manager.smart_fetch_subtitles(
+            query=canonical_title,
+            imdb_id=imdb_id,
+            output_dir=sub_output_dir,
+            video_filename=os.path.basename(target_video_path),
+            release_type=best.get("release_type")
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_emb = pool.submit(_run_embedded_check)
+        fut_sub = pool.submit(_run_sub_fetch)
+        embedded_check = fut_emb.result()
+        sub_fetch = fut_sub.result()
 
     subtitle_report = {}
     if embedded_check.get("has_embedded_arabic"):
+        # Clean up unneeded external subtitles fetched in parallel
+        for item in sub_fetch.get("downloaded", []):
+            fp = item.get("file_path")
+            if fp and os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+        for extra in [f"{v_stem}.srt", f"{v_stem}.ar.srt"]:
+            ep = os.path.join(sub_output_dir, extra)
+            if os.path.exists(ep):
+                try:
+                    os.remove(ep)
+                except Exception:
+                    pass
+        try:
+            if os.path.isdir(sub_output_dir) and not os.listdir(sub_output_dir):
+                os.rmdir(sub_output_dir)
+        except Exception:
+            pass
         subtitle_report = {
             "status": "embedded_arabic_found",
             "has_embedded_arabic": True,
@@ -937,18 +977,6 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
             "message": "الفلم يحتوي مسبقاً على ترجمة عربية رسمية مدمجة داخل ملف الفيديو (لا حاجة لتحميل ترجمة خارجية)."
         }
     else:
-        # Save external subtitles inside a dedicated Subtitles subfolder
-        sub_output_dir = os.path.join(output_dir, "Subtitles")
-        os.makedirs(sub_output_dir, exist_ok=True)
-
-        # Fetch subtitles strictly from SubSource & SubDL (All Platforms + Top Translators, deduplicated)
-        sub_fetch = subtitle_manager.smart_fetch_subtitles(
-            query=canonical_title,
-            imdb_id=imdb_id,
-            output_dir=sub_output_dir,
-            video_filename=os.path.basename(target_video_path),
-            release_type=best.get("release_type")
-        )
         downloaded_subs = sub_fetch.get("downloaded", [])
 
         # Launch detached background watcher to run alass timing sync & MKV muxing as soon as Aria2 finishes
@@ -961,7 +989,7 @@ def fast_download_movie(query_or_imdb, output_dir=None, year=None):
                 sub_mgr_py = os.path.join(SKILL_DIR, "subtitle_manager.py")
                 watch_cmd = [sys.executable, sub_mgr_py, "watch-and-sync", target_video_path, manifest_path]
                 if sys.platform == "win32":
-                    watcher_launched = _launch_detached_win32(watch_cmd)
+                    watcher_launched = _launch_detached_win32(watch_cmd, hidden=True)
                     if not watcher_launched:
                         CREATE_NO_WINDOW = 0x08000000
                         DETACHED_PROCESS = 0x00000008
@@ -1134,14 +1162,22 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
         player = cfg.get("default_player", "mpc")
     player = player.lower()
 
+    def _launch_player(cmd, player_name):
+        if sys.platform == "win32":
+            ok = _launch_detached_win32(cmd, hidden=False)
+            if not ok:
+                subprocess.Popen(cmd, creationflags=0x00000008, close_fds=True)
+        else:
+            subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"success": True, "player": player_name, "target": video_path_or_url, "subtitle": subtitle_path}
+
     if player in ["mpc", "mpc-hc", "mpchc"]:
         mpc_bin = r"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe"
         if os.path.exists(mpc_bin):
             cmd = [mpc_bin, video_path_or_url]
             if subtitle_path and os.path.exists(subtitle_path):
                 cmd.extend(["/sub", subtitle_path])
-            subprocess.Popen(cmd)
-            return {"success": True, "player": "MPC-HC", "target": video_path_or_url, "subtitle": subtitle_path}
+            return _launch_player(cmd, "MPC-HC")
 
     elif player == "potplayer":
         pot_bin = r"C:\Program Files\DAUM\PotPlayer\PotPlayer64.exe"
@@ -1149,16 +1185,14 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
             cmd = [pot_bin, video_path_or_url]
             if subtitle_path and os.path.exists(subtitle_path):
                 cmd.append(f"/sub={subtitle_path}")
-            subprocess.Popen(cmd)
-            return {"success": True, "player": "PotPlayer", "target": video_path_or_url, "subtitle": subtitle_path}
+            return _launch_player(cmd, "PotPlayer")
 
     elif player in ["mpv", "harbor"]:
         mpv_bin = HARBOR_MPV_PATH if os.path.exists(HARBOR_MPV_PATH) else "mpv"
         cmd = [mpv_bin, video_path_or_url, "--force-window=yes"]
         if subtitle_path and os.path.exists(subtitle_path):
             cmd.append(f"--sub-file={subtitle_path}")
-        subprocess.Popen(cmd)
-        return {"success": True, "player": "MPV", "target": video_path_or_url, "subtitle": subtitle_path}
+        return _launch_player(cmd, "MPV")
 
     elif player == "vlc":
         vlc_bin = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
@@ -1166,10 +1200,133 @@ def stream_to_player(video_path_or_url, subtitle_path=None, player=None):
             cmd = [vlc_bin, video_path_or_url]
             if subtitle_path and os.path.exists(subtitle_path):
                 cmd.append(f"--sub-file={subtitle_path}")
-            subprocess.Popen(cmd)
-            return {"success": True, "player": "VLC", "target": video_path_or_url, "subtitle": subtitle_path}
+            return _launch_player(cmd, "VLC")
 
     return {"error": True, "message": f"Player not found: {player}"}
+
+
+def _sync_sub_for_stream_url(stream_url, sub_path):
+    """
+    Fast stream-safe subtitle sync without downloading the whole movie:
+    Grabs a short 4-minute audio window at t=300s via HTTP range seek (~3s),
+    measures/aligns offset via alass, and shifts the full subtitle cleanly.
+    """
+    import subtitle_manager
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    alass_bin = subtitle_manager.get_alass_bin()
+    if not alass_bin:
+        return {"synced": False, "reason": "alass_not_found"}
+
+    tmp_dir = os.path.join(os.environ.get("TEMP", "."), "torrentx_stream_sync")
+    os.makedirs(tmp_dir, exist_ok=True)
+    wav_path = os.path.join(tmp_dir, f"sample_{int(time.time())}.wav")
+    win_srt = os.path.join(tmp_dir, f"win_{int(time.time())}.srt")
+    out_win_srt = os.path.join(tmp_dir, f"win_out_{int(time.time())}.srt")
+    offset_sec = 300.0
+
+    try:
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-ss", str(int(offset_sec)), "-t", "240", "-i", stream_url,
+             "-vn", "-ac", "1", "-ar", "16000", wav_path],
+            capture_output=True, text=True, timeout=25, encoding="utf-8", errors="replace"
+        )
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 50000:
+            return {"synced": False, "reason": "audio_sample_unavailable"}
+
+        # Shift full sub by -offset_sec into window [0..240s] for fast alass alignment
+        subtitle_manager.shift_subtitle_timestamps(sub_path, -offset_sec, win_srt)
+        subprocess.run(
+            [alass_bin, wav_path, win_srt, out_win_srt],
+            capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace"
+        )
+        if os.path.exists(out_win_srt) and os.path.getsize(out_win_srt) > 500:
+            orig_first, _, _ = subtitle_manager.parse_sub_timestamps(win_srt)
+            new_first, _, _ = subtitle_manager.parse_sub_timestamps(out_win_srt)
+            if orig_first is not None and new_first is not None:
+                delta = round(new_first - orig_first, 2)
+                if abs(delta) > 0.35 and abs(delta) < 120.0:
+                    subtitle_manager.shift_subtitle_timestamps(sub_path, delta, sub_path)
+                    subtitle_manager.convert_to_utf8_bom(sub_path, apply_rtl_fix=True)
+                    return {"synced": True, "shift_seconds": delta, "method": "stream_audio_window_alass"}
+                return {"synced": True, "shift_seconds": 0.0, "method": "stream_audio_verified"}
+    except Exception as e:
+        return {"synced": False, "reason": str(e)}
+    finally:
+        for p in [wav_path, win_srt, out_win_srt]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+    return {"synced": False, "reason": "no_adjustment"}
+
+
+def stream_movie(query_or_imdb, player="mpc", year=None):
+    """
+    Streams the best 4K/1080p Remux/WEB-DL release directly in the chosen player
+    WITHOUT downloading the movie, while fetching & syncing Arabic subtitles.
+    """
+    t0 = time.time()
+    imdb_id, canonical_title, release_year = resolve_movie_identity(query_or_imdb, year=year)
+    if not imdb_id:
+        return {"error": True, "message": f"لم يتم العثور على الفلم '{query_or_imdb}'."}
+
+    streams = fetch_torrentio_movie_streams(imdb_id)
+    if not streams:
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": f"لا توجد روابط متاحة للفلم {canonical_title}."}
+
+    best, _ = select_best_movie_release(streams)
+    if not best or not best.get("direct_url"):
+        return {"error": True, "imdb_id": imdb_id, "title": canonical_title, "message": "لم يتم العثور على رابط بث مباشر مخزن على TorBox."}
+
+    stream_url = unwrap_debrid_redirect(best["direct_url"])
+
+    import subtitle_manager
+    sub_cache_dir = os.path.join(os.environ.get("TEMP", "."), "torrentx_stream_subs", re.sub(r'[\\/*?:"<>|]', '', canonical_title))
+    os.makedirs(sub_cache_dir, exist_ok=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_emb = pool.submit(subtitle_manager.check_embedded_arabic_sub, stream_url, 10)
+        fut_sub = pool.submit(
+            subtitle_manager.smart_fetch_subtitles,
+            canonical_title, imdb_id, sub_cache_dir, best["title"], best.get("release_type")
+        )
+        embedded_check = fut_emb.result()
+        sub_fetch = fut_sub.result()
+
+    sub_to_load = None
+    sync_info = None
+    if embedded_check.get("has_embedded_arabic"):
+        subtitle_status = "embedded_arabic_found"
+    else:
+        primary_sub = sub_fetch.get("primary_subtitle")
+        if primary_sub and os.path.exists(primary_sub):
+            sync_info = _sync_sub_for_stream_url(stream_url, primary_sub)
+            sub_to_load = primary_sub
+            subtitle_status = "external_synced_for_stream"
+        else:
+            subtitle_status = "no_arabic_subtitle_found"
+
+    play_res = stream_to_player(stream_url, subtitle_path=sub_to_load, player=player)
+    return {
+        "success": bool(play_res.get("success")),
+        "mode": "stream_without_download",
+        "elapsed_seconds": round(time.time() - t0, 2),
+        "movie": {"title": canonical_title, "year": release_year, "imdb_id": imdb_id},
+        "selected_release": {
+            "filename": best["title"],
+            "quality_tier": best["tier_label"],
+            "size_gb": f"{best['size_gb']} GB"
+        },
+        "player": play_res,
+        "subtitles": {
+            "status": subtitle_status,
+            "has_embedded_arabic": embedded_check.get("has_embedded_arabic", False),
+            "embedded_tracks": embedded_check.get("arabic_tracks", []),
+            "loaded_subtitle_path": sub_to_load,
+            "stream_sync": sync_info
+        }
+    }
 
 
 if __name__ == "__main__":
@@ -1181,10 +1338,18 @@ if __name__ == "__main__":
         print("  python debrid_manager.py probe <url_or_path>")
         print("  python debrid_manager.py resolve <magnet>")
         print("  python debrid_manager.py play <url_or_path> [sub_path] [mpc|potplayer|mpv|vlc]")
+        print("  python debrid_manager.py stream-movie <title_or_imdb> [mpc|potplayer|mpv|vlc] [year]")
         sys.exit(1)
 
     action = sys.argv[1].lower()
-    if action == "fast-movie" and len(sys.argv) >= 3:
+    if action == "stream-movie" and len(sys.argv) >= 3:
+        q = sys.argv[2]
+        plr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "none" else "mpc"
+        yr = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "none" else None
+        res = stream_movie(q, player=plr, year=yr)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+
+    elif action == "fast-movie" and len(sys.argv) >= 3:
         q = sys.argv[2]
         out_d = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "none" else None
         yr = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "none" else None
