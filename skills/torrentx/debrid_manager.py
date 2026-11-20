@@ -86,7 +86,7 @@ def load_config():
         "default_downloader": "aria2",
         "default_player": "mpc",
         "default_quality": "remux",
-        "max_download_limit": "29M",
+        "max_download_limit": "0",
         "mux_subtitles_into_video": True
     }
     for k, v in SERVICES_META.items():
@@ -509,7 +509,7 @@ def send_to_downloader(download_url, downloader=None, output_dir=None, file_name
             if not clean_filename.lower().endswith((".mkv", ".mp4", ".avi", ".ts", ".m2ts")):
                 clean_filename += ".mkv"
 
-        max_limit = cfg.get("max_download_limit", "29M")
+        max_limit = cfg.get("max_download_limit", "0")
         conn_count = "1" if ("tb-cdn" in download_url or "torbox" in download_url) else "16"
         cmd = [
             aria2_cmd,
