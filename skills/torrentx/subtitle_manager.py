@@ -200,8 +200,8 @@ def fix_arabic_rtl_text(sub_text):
             if m_td and arabic_pattern.search(m_td.group(1)):
                 core = f"{m_td.group(2)} {m_td.group(1)}"
 
-        # Rule 4: Peel optional leading dialogue dash
-        m_ld = re.match(r"^([-–—ـ]\s*)(.+)$", core)
+        # Rule 4: Peel optional leading dialogue dash (including tatweel 'ـ ' used as dialogue dash)
+        m_ld = re.match(r"^((?:[-–—]\s*|ـ\s+))(.+)$", core)
         if m_ld:
             lead_dash, inner = m_ld.group(1), m_ld.group(2).strip(BIDI_STRIP)
         else:
@@ -247,12 +247,10 @@ def fix_arabic_rtl_text(sub_text):
                 if m_q:
                     inner = '"' + inner[:m_q.start()] + m_q.group(1) + m_q.group(2)
 
-        # Rule 7: Re-attach dash, trailing RLM, and RLE/PDF inside outer HTML tags
+        # Rule 7: Re-attach dash (normalizing tatweel 'ـ ' to '- '), trailing RLM, and RLE/PDF inside outer HTML tags
         if lead_dash:
-            if lead_dash[0] in ("-", "–", "—"):
-                core = f"{RLM}{lead_dash[0]} {inner.lstrip()}"
-            else:
-                core = f"{lead_dash}{inner}"
+            dash_ch = "-" if lead_dash[0] == "ـ" else lead_dash[0]
+            core = f"{RLM}{dash_ch} {inner.lstrip()}"
         else:
             core = inner
 
